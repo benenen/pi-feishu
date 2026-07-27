@@ -97,12 +97,20 @@ export class FeishuGateway {
   }
 
   async disconnect(): Promise<void> {
-    // 会话结束时所有未决审批一律拒绝
-    this.#approvals.cancelAll({ allow: false, reason: "会话已结束" });
+    // 会话结束时所有未决审批一律拒绝，并把卡片收到终态 ——
+    // 否则飞书里会永远留着一张还带「允许/拒绝」按钮的卡片
+    const stranded = this.#approvals.cancelAll({ allow: false, reason: "会话已结束" });
+    for (const messageId of stranded) {
+      await this.#settleCard(messageId, "会话已结束");
+    }
     const channel = this.#channel;
     this.#channel = undefined;
     this.#bound = undefined;
-    if (channel) await channel.disconnect().catch(() => {});
+    if (channel) {
+      await channel.disconnect().catch((err: unknown) => {
+        this.#log(`飞书断开连接时出错：${String(err)}`);
+      });
+    }
   }
 
   async streamTurn(run: (sink: AppendSink) => Promise<void>): Promise<void> {
@@ -135,23 +143,43 @@ export class FeishuGateway {
     const to = this.#bound;
     if (!channel || !to) throw new Error("飞书未连接或未绑定会话");
 
-    const id = `ap-${++this.#seq}`;
-    const result = await channel.send(to, { card: buildApprovalCard(id, req) });
-    const pending = this.#approvals.register(id, result.messageId);
+    // 竞速可能在卡片还没发出去时就被别的通道结束掉。abort 事件不会补发给
+    // 事后才挂上的监听器，所以必须在 await 之前就把它接住。
+    if (signal.aborted) return { allow: false, reason: "已由其他通道处理" };
 
-    signal.addEventListener(
-      "abort",
-      () => {
+    let aborted = false;
+    let onAbort: (() => void) | undefined;
+    const abortedEarly = new Promise<void>((resolve) => {
+      onAbort = () => {
+        aborted = true;
+        resolve();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+
+    const id = `ap-${++this.#seq}`;
+    try {
+      const result = await channel.send(to, { card: buildApprovalCard(id, req) });
+
+      if (aborted) {
+        // 竞速已结束，这张卡片刚发出来就作废，直接收到终态
+        await this.#settleCard(result.messageId, "已在终端处理");
+        return { allow: false, reason: "已由其他通道处理" };
+      }
+
+      const pending = this.#approvals.register(id, result.messageId);
+      void abortedEarly.then(() => {
         const messageId = this.#approvals.cancel(id, {
           allow: false,
           reason: "已由其他通道处理",
         });
         if (messageId) void this.#settleCard(messageId, "已在终端处理");
-      },
-      { once: true },
-    );
+      });
 
-    return await pending;
+      return await pending;
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
   };
 
   async #settleCard(messageId: string, status: string): Promise<void> {

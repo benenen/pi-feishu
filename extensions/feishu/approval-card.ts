@@ -95,11 +95,18 @@ export class ApprovalRegistry {
     return entry.messageId;
   }
 
+  /** settle 的别名，仅用于在调用点表达「是被撤销的，不是被回答的」 */
   cancel(id: string, decision: Decision): string | undefined {
     return this.settle(id, decision);
   }
 
-  cancelAll(decision: Decision): void {
-    for (const id of [...this.#pending.keys()]) this.settle(id, decision);
+  /** 全部兑现并移除；返回被撤销的卡片 messageId，供调用方把卡片收到终态 */
+  cancelAll(decision: Decision): string[] {
+    const settled: string[] = [];
+    for (const id of [...this.#pending.keys()]) {
+      const messageId = this.settle(id, decision);
+      if (messageId !== undefined) settled.push(messageId);
+    }
+    return settled;
   }
 }

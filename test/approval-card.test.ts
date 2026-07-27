@@ -4,6 +4,7 @@ import {
   APPROVAL_KIND,
   ApprovalRegistry,
   buildApprovalCard,
+  buildSettledCard,
   parseApprovalAction,
   resolveTarget,
 } from "../extensions/feishu/approval-card.ts";
@@ -92,4 +93,43 @@ test("resolveTarget：显式收件方优先于已绑定会话", () => {
   assert.equal(resolveTarget("oc_bound", undefined), "oc_bound");
   assert.equal(resolveTarget(undefined, "oc_other"), "oc_other");
   assert.equal(resolveTarget(undefined, undefined), undefined, "都没有时不应发送");
+});
+
+test("registry：cancelAll 交回被撤销的 messageId，供调用方收尾卡片", async () => {
+  const reg = new ApprovalRegistry();
+  const a = reg.register("ap-1", "om_1");
+  const b = reg.register("ap-2", "om_2");
+  const stranded = reg.cancelAll({ allow: false, reason: "会话已结束" });
+  assert.deepEqual(stranded.sort(), ["om_1", "om_2"]);
+  assert.equal(reg.size, 0);
+  assert.equal((await a).allow, false);
+  assert.equal((await b).reason, "会话已结束");
+});
+
+test("registry：cancelAll 无未决审批时返回空数组", () => {
+  assert.deepEqual(new ApprovalRegistry().cancelAll({ allow: false, reason: "x" }), []);
+});
+
+test("buildSettledCard 只剩状态文案，不再带按钮", () => {
+  const card = buildSettledCard("已批准") as { elements: { tag: string }[] };
+  assert.equal(card.elements.length, 1);
+  assert.equal(card.elements.some((e) => e.tag === "action"), false, "不应残留可点按钮");
+  assert.ok(JSON.stringify(card).includes("已批准"));
+});
+
+test("parseApprovalAction：非布尔的 allow 一律视为拒绝", () => {
+  assert.deepEqual(parseApprovalAction({ kind: APPROVAL_KIND, id: "a", allow: "yes" }), {
+    id: "a",
+    allow: false,
+  });
+  assert.deepEqual(parseApprovalAction({ kind: APPROVAL_KIND, id: "a", allow: 1 }), {
+    id: "a",
+    allow: false,
+  });
+});
+
+test("无 command/path 的工具，卡片正文回退到序列化 input", () => {
+  const json = JSON.stringify(buildApprovalCard("ap-1", { toolName: "weird", input: { a: 1 } }));
+  assert.ok(json.includes("weird"), "标题应含工具名");
+  assert.ok(json.includes('{\\"a\\":1}'), "正文应含序列化后的 input");
 });
