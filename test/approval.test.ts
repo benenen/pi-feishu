@@ -83,3 +83,40 @@ test("落败通道的 reject 不会造成未处理拒绝", async () => {
   // 给落败通道的 reject 一个冒出来的机会；若未被吞掉，进程级 unhandledRejection 会让测试失败
   await new Promise((r) => setTimeout(r, 10));
 });
+
+test("超时定时器在竞速结束后一定被清掉", async () => {
+  const cleared: unknown[] = [];
+  const spy: Timer = {
+    setTimeout: () => "timer-id",
+    clearTimeout: (id) => {
+      cleared.push(id);
+    },
+  };
+  const fast: Asker = async () => ({ allow: true, reason: "飞书批准" });
+  await requestApproval(REQ, [fast], 10_000, spy);
+  assert.deepEqual(cleared, ["timer-id"], "必须用 setTimeout 返回的 id 清理");
+});
+
+test("超时时长被正确带进定时器与理由文案", async () => {
+  let seenMs: number | undefined;
+  const spy: Timer = {
+    setTimeout: (fn, ms) => {
+      seenMs = ms;
+      queueMicrotask(fn);
+      return 0;
+    },
+    clearTimeout: () => {},
+  };
+  const d = await requestApproval(REQ, [never], 4321, spy);
+  assert.equal(seenMs, 4321);
+  assert.ok(d.reason.includes("4321"), `理由应含时长，实际：${d.reason}`);
+});
+
+test("落败通道事后返回 allow 也翻不了案", async () => {
+  // 无视 abort、在竞速结束后才返回批准的通道
+  const lateYes: Asker = () =>
+    new Promise((resolve) => setTimeout(() => resolve({ allow: true, reason: "迟到的批准" }), 30));
+  const d = await requestApproval(REQ, [lateYes], 1, fireNow);
+  assert.equal(d.allow, false, "已经判拒之后不能被翻盘");
+  await new Promise((r) => setTimeout(r, 60));
+});
