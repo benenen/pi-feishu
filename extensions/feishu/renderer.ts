@@ -9,15 +9,28 @@ export function formatTokens(n: number): string {
   return n < 1000 ? String(n) : `${(n / 1000).toFixed(1)}k`;
 }
 
-/** 压平换行、折叠空白、超长截断 */
+/**
+ * 压平换行、折叠空白、超长截断。
+ * 按码点而非 UTF-16 码元切，否则 emoji 会被劈成孤立代理项 —— 飞书是聊天
+ * 场景，emoji 是必然会遇到的。
+ */
 function flatten(text: string, max: number): string {
   const one = text.replace(/\s+/g, " ").trim();
-  return one.length <= max ? one : `${one.slice(0, max - 1)}…`;
+  const points = Array.from(one);
+  return points.length <= max ? one : `${points.slice(0, max - 1).join("")}…`;
 }
 
 /** 反引号会撑破 markdown 代码片段，替换成单引号 */
 function codeSpan(text: string): string {
   return `\`${text.replace(/`/g, "'")}\``;
+}
+
+/**
+ * 中和会撑破粗体/代码片段的字符，用于直接插进 markup 的字段。
+ * 不动下划线 —— `ask_question` 这类工具名里它很常见，剥掉反而是破坏。
+ */
+function plain(text: string, max: number): string {
+  return flatten(text, max).replace(/[*`~]/g, "");
 }
 
 export function renderUserPrompt(
@@ -36,9 +49,10 @@ export function renderToolStart(toolName: string, input: Record<string, unknown>
   } else if (typeof input.path === "string") {
     detail = flatten(input.path, 120);
   }
+  const name = plain(toolName, 40);
   return detail === ""
-    ? `\n⚙️ **${toolName}**\n`
-    : `\n⚙️ **${toolName}** ${codeSpan(detail)}\n`;
+    ? `\n⚙️ **${name}**\n`
+    : `\n⚙️ **${name}** ${codeSpan(detail)}\n`;
 }
 
 export function renderToolEnd(isError: boolean, elapsedMs: number): string {
@@ -52,9 +66,10 @@ export function renderTurnEnd(elapsedMs: number, tokens: number): string {
 }
 
 export function renderBlocked(toolName: string, reason: string): string {
-  return `\n🚫 已拦截 **${toolName}** —— ${reason}\n`;
+  // reason 最终可能来自人工输入的拒绝理由，必须中和后再插进 markup
+  return `\n🚫 已拦截 **${plain(toolName, 40)}** —— ${plain(reason, 200)}\n`;
 }
 
 export function renderNotice(text: string): string {
-  return `\nℹ️ ${text}\n`;
+  return `\nℹ️ ${plain(text, 200)}\n`;
 }

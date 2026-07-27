@@ -4,6 +4,7 @@ import {
   formatDuration,
   formatTokens,
   renderBlocked,
+  renderNotice,
   renderToolEnd,
   renderToolStart,
   renderTurnEnd,
@@ -62,4 +63,30 @@ test("拦截提示包含工具名和原因", () => {
   assert.ok(out.includes("bash"));
   assert.ok(out.includes("审批超时"));
   assert.ok(out.includes("🚫"));
+});
+
+test("emoji 截断不会劈开代理对", () => {
+  const out = renderUserPrompt("😀".repeat(300), "interactive");
+  assert.ok(out !== null);
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert.equal(lone.test(out), false, "不应出现孤立代理项");
+  assert.ok(out.endsWith("…\n\n"));
+});
+
+test("toolName 里的 markdown 记号被中和，不会撑破粗体", () => {
+  const out = renderToolStart("ba**sh", {});
+  assert.equal(out.split("**").length - 1, 2, "只应有一对包裹用的 **");
+});
+
+test("拦截理由里的换行与记号被中和", () => {
+  const out = renderBlocked("bash", "第一行\n第二行 **粗** `码`");
+  assert.equal(out.split("\n").length - 1, 2, "只应有首尾两个换行");
+  assert.equal(out.split("**").length - 1, 2);
+  assert.ok(!out.includes("`"));
+});
+
+test("renderNotice 同样中和", () => {
+  const out = renderNotice("提示\n第二行 **粗**");
+  assert.equal(out.split("\n").length - 1, 2);
+  assert.ok(!out.includes("**"));
 });
