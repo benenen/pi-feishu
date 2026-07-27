@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 
 export type ApprovalMode = "balanced" | "strict";
@@ -24,9 +25,41 @@ export class ConfigError extends Error {
   }
 }
 
+export interface ConfigFile {
+  /** 已解析的内容；文件不存在时为 undefined */
+  value: unknown;
+  /** 文件存在但解析失败时的说明；否则为 undefined */
+  problem?: string;
+}
+
+export type FileReader = (file: string) => string | undefined;
+
+const readFileOrUndefined: FileReader = (file) => {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * 读一个配置文件。刻意把「文件不存在」和「文件存在但 JSON 有语法错」区分开 ——
+ * 两者都静默跳过的话，用户改坏了配置只会看到一句莫名其妙的「缺少 appId」，
+ * 或者更糟：白名单悄悄退回空数组而毫无提示。
+ */
+export function readConfigFile(file: string, read: FileReader = readFileOrUndefined): ConfigFile {
+  const raw = read(file);
+  if (raw === undefined) return { value: undefined };
+  try {
+    return { value: JSON.parse(raw) };
+  } catch (err) {
+    return { value: undefined, problem: `${file} 不是合法的 JSON：${String(err)}` };
+  }
+}
+
 export interface LoadConfigArgs {
-  /** 低优先级在前，后面的覆盖前面的 */
-  files: unknown[];
+  /** 低优先级在前，后面的覆盖前面的。可以是已解析的值，也可以是 readConfigFile 的结果 */
+  files: (unknown | ConfigFile)[];
   env: Record<string, string | undefined>;
   cwd: string;
 }
@@ -57,9 +90,18 @@ function readBoolean(v: unknown, key: string, fallback: boolean, problems: strin
 
 export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
   const merged: Record<string, unknown> = {};
-  for (const f of files) Object.assign(merged, asRecord(f));
-
   const problems: string[] = [];
+
+  for (const f of files) {
+    // readConfigFile 的结果带 problem 字段；直接传进来的普通对象没有
+    if (f !== null && typeof f === "object" && "value" in f) {
+      const entry = f as ConfigFile;
+      if (entry.problem !== undefined) problems.push(entry.problem);
+      Object.assign(merged, asRecord(entry.value));
+      continue;
+    }
+    Object.assign(merged, asRecord(f));
+  }
 
   const appId = env.FEISHU_APP_ID ?? (typeof merged.appId === "string" ? merged.appId : undefined);
   if (!appId) problems.push("缺少 appId（配置文件 appId 或环境变量 FEISHU_APP_ID）");

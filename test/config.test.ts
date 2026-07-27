@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { loadConfig, ConfigError } from "../extensions/feishu/config.ts";
+import { loadConfig, readConfigFile, ConfigError } from "../extensions/feishu/config.ts";
 
 const base = { appId: "cli_x", appSecret: "sec", dmAllowlist: ["ou_1"] };
 
@@ -82,4 +82,42 @@ test("非法的 approvalMode 和 approvalTimeoutMs 都被拒绝", () => {
 test("repoRoot 显式配置时被解析为绝对路径", () => {
   const c = loadConfig({ files: [{ ...base, repoRoot: "/srv/proj/" }], env: {}, cwd: "/w" });
   assert.equal(c.repoRoot, path.resolve("/srv/proj"));
+});
+
+test("readConfigFile：文件不存在时安静跳过", () => {
+  const r = readConfigFile("/nope/feishu.json", () => undefined);
+  assert.deepEqual(r, { value: undefined });
+});
+
+test("readConfigFile：合法 JSON 被解析出来", () => {
+  const r = readConfigFile("/x/feishu.json", () => '{"autoStart":true}');
+  assert.deepEqual(r.value, { autoStart: true });
+  assert.equal(r.problem, undefined);
+});
+
+test("readConfigFile：文件存在但语法错要报出来，而不是当成不存在", () => {
+  const r = readConfigFile("/x/feishu.json", () => '{"autoStart":true,}');
+  assert.equal(r.value, undefined);
+  assert.ok(r.problem?.includes("/x/feishu.json"));
+  assert.ok(r.problem?.includes("不是合法的 JSON"));
+});
+
+test("loadConfig：语法错的配置文件会变成一条 ConfigError 问题", () => {
+  const err = throwsConfigError(() =>
+    loadConfig({
+      files: [{ ...base }, readConfigFile("/x/feishu.json", () => "{oops")],
+      env: {},
+      cwd: "/w",
+    }),
+  );
+  assert.ok(err.problems.some((p) => p.includes("不是合法的 JSON")));
+});
+
+test("loadConfig：文件缺失不产生问题，仍用其余来源", () => {
+  const c = loadConfig({
+    files: [readConfigFile("/nope.json", () => undefined), { ...base }],
+    env: {},
+    cwd: "/w",
+  });
+  assert.equal(c.appId, "cli_x");
 });

@@ -1,29 +1,36 @@
-import fs from "node:fs";
 import path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { ConfigError, loadConfig, type Config } from "./config.ts";
+import { ConfigError, loadConfig, readConfigFile, type Config } from "./config.ts";
 import { FeishuGateway } from "./feishu.ts";
 import { Bridge, decideDelivery, parseControlCommand, shouldAccept } from "./bridge.ts";
 import type { Asker } from "./approval.ts";
 
-function readJsonIfExists(file: string): unknown {
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return undefined;
-  }
-}
+/** 会话切换时等待断开的上限，防止飞书 API 挂住把 /new 一起冻住 */
+const SHUTDOWN_TIMEOUT_MS = 5_000;
 
 function resolveConfig(cwd: string): Config {
   return loadConfig({
     files: [
-      readJsonIfExists(path.join(getAgentDir(), "feishu.json")),
-      readJsonIfExists(path.join(cwd, ".pi", "feishu.json")),
+      readConfigFile(path.join(getAgentDir(), "feishu.json")),
+      readConfigFile(path.join(cwd, ".pi", "feishu.json")),
     ],
     env: process.env,
     cwd,
   });
+}
+
+/** 超时就放弃等待 —— 宁可留个半开的连接，也不能把会话切换冻住 */
+async function withTimeout(work: Promise<void>, ms: number, onTimeout: () => void): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = await Promise.race([
+    work.then(() => false),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(true), ms);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  if (timedOut) onTimeout();
 }
 
 export default function (pi: ExtensionAPI) {
@@ -85,7 +92,14 @@ export default function (pi: ExtensionAPI) {
       })();
     });
 
-    await gw.connect();
+    try {
+      await gw.connect();
+    } catch (err) {
+      // 凭据错、网络不通是新用户最常撞的两件事，必须给出本地化提示，
+      // 而不是让异常冒到 pi 的通用错误通道里
+      notify(`飞书连接失败：${String(err)}`);
+      return;
+    }
     gateway = gw;
     bridge = br;
     notify("飞书桥接已启动，等待消息绑定会话");
@@ -99,8 +113,10 @@ export default function (pi: ExtensionAPI) {
       notify("飞书桥接未在运行");
       return;
     }
-    await gw.disconnect();
+    // 先回执再断开：飞书侧的 notify 走的正是 gw.sendText，
+    // disconnect 会把 channel 清掉，之后再发就是静默丢弃
     notify("飞书桥接已停止");
+    await gw.disconnect();
   }
 
   pi.registerCommand("feishu", {
@@ -131,16 +147,21 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
-    await stop(() => {});
+    await withTimeout(stop(() => {}), SHUTDOWN_TIMEOUT_MS, () =>
+      log("断开飞书超时，放弃等待"),
+    );
   });
 
   // 会话被替换前先断开，未决审批在 disconnect 里一律拒绝
-  pi.on("session_before_switch", async () => {
-    await stop(() => {});
-  });
-  pi.on("session_before_fork", async () => {
-    await stop(() => {});
-  });
+  // 会话切换/派生前必须断开，但不能无限等：disconnect 会逐张收尾审批卡片，
+  // 飞书 API 一旦挂住（不是拒绝，是不返回），/new 就跟着永久冻住
+  const stopForReplacement = async () => {
+    await withTimeout(stop(() => {}), SHUTDOWN_TIMEOUT_MS, () =>
+      log("会话切换时断开飞书超时，放弃等待"),
+    );
+  };
+  pi.on("session_before_switch", stopForReplacement);
+  pi.on("session_before_fork", stopForReplacement);
 
   pi.on("input", (event) => {
     bridge?.onUserPrompt(event.text, event.source === "extension" ? "feishu" : "interactive");

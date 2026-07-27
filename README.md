@@ -11,7 +11,10 @@ pi install git:github.com/you/pi-feishu
 
 ## 配置
 
-配置按 `~/.pi/agent/feishu.json` → `<项目>/.pi/feishu.json` → 环境变量的顺序合并，后者覆盖前者。
+配置按 `~/.pi/agent/feishu.json` → `<项目>/.pi/feishu.json` 的顺序合并，后者覆盖前者。
+环境变量只用于凭据两项（`FEISHU_APP_ID` / `FEISHU_APP_SECRET`），且优先级最高；其余键只能写在配置文件里。
+
+配置文件如果存在但 JSON 有语法错，会明确报「不是合法的 JSON」，不会被当成「文件不存在」悄悄跳过。
 
 ```json
 {
@@ -45,13 +48,17 @@ pi install git:github.com/you/pi-feishu
 
 ## 使用
 
+终端里：
+
 ```
 /feishu start     启动桥接
 /feishu status    查看连接与绑定状态
 /feishu stop      停止并解绑
 ```
 
-首条通过白名单的消息会**绑定**该会话，之后其他对话的消息一律回绝。
+飞书里只有 `/feishu status` 和 `/feishu stop` —— **`start` 只能从终端发起**，建立长连接是拿着终端的人的决定。
+
+首条通过白名单的消息会**绑定**该会话，之后其他对话的消息一律回绝（回执发到发起方那个会话，不是已绑定的那个）。
 
 飞书侧消息前缀 `!` 表示打断当前回合（steer），否则排队到回合结束（followUp）。
 
@@ -83,4 +90,7 @@ Node ≥ 24（依赖原生 TypeScript 类型剥离，无构建步骤）。
 - [ ] 绑定后换个会话发消息 → 收到「已绑定到其他对话」
 - [ ] 断开网络再恢复 → 日志出现重连并恢复，后续消息仍可用
 - [ ] `/new` 重置会话 → 桥接断开；`/feishu start` 可重新绑定
+- [ ] 故意填错 `appSecret` → `/feishu start` 报出中文的「飞书连接失败：…」，而不是 pi 的通用错误
+- [ ] 故意把 `feishu.json` 写成非法 JSON → 报「不是合法的 JSON」，而不是「缺少 appId」
+- [ ] 在飞书里发 `/feishu stop` → **飞书这一侧**能收到「飞书桥接已停止」的回执
 - [ ] `/feishu stop` 后飞书消息不再进入 pi
