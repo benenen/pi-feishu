@@ -39,3 +39,20 @@
 ## 已知残余（已写入 spec，是取舍不是漏洞）
 仓库内 write 是 safe、npm test 也是 safe，「改 package.json → 跑测试」链在边界内成立。
 这是「让代理在仓库里无人值守干活」的固有代价；要堵用 strict 档。
+
+## 第 4 轮审查后的修复
+审查报出一个可复现的越界写入，已核实并修复：
+
+    $ bash -c 'set -- find / {-delete,}; printf "[%s] " "$@"'
+    [find] [/] [-delete]        ← bash 展开后的真实 argv
+    判定结果: safe               ← shell-quote 完全不做花括号展开
+
+修复：
+1. RAW_FORBIDDEN 加入 `{` `}`（花括号展开）
+2. glob 也放弃判定 —— 只看得到未展开的模式串，看不到实际 argv
+3. cargo fmt 移出（`cargo fmt -- <path>` 经位置参数就地改写文件，与 uniq 同类）
+4. go 改 style:"word" —— Go 用单横杠长标志，原配置下 long 表根本查不到，全部误判危险
+5. du 去掉无依据的 numeric
+
+    $ npm test → 38/38 pass    $ npm run typecheck → exit 0
+    对抗验证：24 条攻击全拦（含花括号类）、25 条日常命令零误伤

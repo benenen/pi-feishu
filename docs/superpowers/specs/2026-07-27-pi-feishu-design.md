@@ -195,8 +195,8 @@ pi.on("tool_call", async (event, ctx) => {
 
 ### 判定顺序
 
-1. 原始串含反引号或 `$` → **risky**。这两样 `shell-quote` 不报 operator：反引号原样变成普通字符串 token，`$VAR` 被静默展开成空串（`cat $SECRET` 解析成 `["cat", ""]`），两者都会让 token 流与实际执行脱节。
-2. `parse()` 结果里出现任何 operator 对象（管道、重定向、串联、子 shell）→ **risky**。`glob` 除外，它只是文件名模式，按位置参数处理。
+1. 原始串含反引号、`$`、`{` 或 `}` → **risky**。这几样 `shell-quote` 都不报 operator：反引号原样变成普通字符串 token；`$VAR` 被静默展开成空串（`cat $SECRET` 解析成 `["cat", ""]`）；花括号展开它压根不做，`find / {-delete,}` 会解析成一个不以 `-` 开头的 token 被当成位置参数放过，而 bash 展开后的 argv 就是 `find / -delete`。
+2. `parse()` 结果里出现任何 operator 对象（管道、重定向、串联、子 shell、**以及 glob**）→ **risky**。glob 也拦是因为我们只看得到未展开的模式串：仓库里若存在一个名字像标志的文件（`write` 在仓库内无条件放行），`ls *` 展开后就会多出一个从未检查过的标志。加引号的通配符（`find . -name '*.ts'`）是普通字符串，不受影响。
 3. 首 token（小写后）在「子命令表」里：第二个 token 必须属于该表的只读子命令集，**且其余标志全部通过标志白名单**，否则 risky。
 4. 首 token 在「命令表」里：**标志全部通过标志白名单**，否则 risky。
 5. 其余一律 **risky**。

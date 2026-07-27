@@ -10,12 +10,15 @@ const identity: PathResolver = (p) => p;
 const WRITER_TOOLS = new Set(["write", "edit"]);
 
 /**
- * shell-quote 不会把这两类东西报成 operator，必须在原始串上先拒掉：
- *   反引号 —— `whoami` 会原样变成一个普通字符串 token
- *   $      —— $VAR 被静默展开成空串，`cat $SECRET` 解析成 ["cat", ""]
- * 两者都能让 token 流与 shell 实际执行的内容脱节。
+ * shell-quote 不会把这几类东西报成 operator，必须在原始串上先拒掉 ——
+ * 它们都会让 token 流与 shell 实际执行的 argv 脱节：
+ *   反引号  —— `whoami` 原样变成一个普通字符串 token
+ *   $       —— $VAR 被静默展开成空串，`cat $SECRET` 解析成 ["cat", ""]
+ *   { }     —— shell-quote 完全不做花括号展开，`find / {-delete,}` 会变成
+ *              一个不以 `-` 开头的 token 被当成位置参数放过，而 bash 展开后
+ *              的 argv 就是 `find / -delete`
  */
-const RAW_FORBIDDEN = /[`$]/;
+const RAW_FORBIDDEN = /[`${}]/;
 
 /**
  * 允许的标志。命令一旦出现未列出的 `-xxx` 就判危险。
@@ -43,7 +46,7 @@ const READ_ONLY_COMMANDS = new Map<string, FlagPolicy>([
   ["wc", { short: "lwcmL", long: new Set(["lines", "words", "bytes", "chars", "max-line-length"]) }],
   ["file", { short: "biL", long: new Set(["mime", "mime-type", "brief"]) }],
   ["stat", { short: "cfLt", long: new Set(["format", "printf", "dereference", "terse", "file-system"]) }],
-  ["du", { short: "shcamkb", numeric: true, long: new Set(["summarize", "human-readable", "max-depth", "apparent-size", "total", "all"]) }],
+  ["du", { short: "shcamkb", long: new Set(["summarize", "human-readable", "max-depth", "apparent-size", "total", "all"]) }],
   ["df", { short: "hTikaP", long: new Set(["human-readable", "print-type", "inodes", "all", "portability"]) }],
   ["grep", { short: "rRnivEFGPwcLloqsaHhbxzZeuABC", numeric: true, long: new Set(["recursive", "dereference-recursive", "line-number", "ignore-case", "invert-match", "extended-regexp", "fixed-strings", "basic-regexp", "perl-regexp", "word-regexp", "count", "files-with-matches", "files-without-match", "only-matching", "quiet", "no-messages", "with-filename", "no-filename", "byte-offset", "after-context", "before-context", "context", "include", "exclude", "exclude-dir", "color", "colour", "binary-files", "max-count", "text"]) }],
   ["rg", { short: "nivewcLloqSuHhpztgFABC", numeric: true, long: new Set(["glob", "iglob", "type", "type-not", "hidden", "no-ignore", "ignore-case", "line-number", "count", "count-matches", "files-with-matches", "only-matching", "context", "after-context", "before-context", "max-count", "color", "smart-case", "fixed-strings", "word-regexp", "pretty", "json", "no-heading"]) }],
@@ -91,8 +94,12 @@ const READ_ONLY_SUBCOMMANDS = new Map<string, SubcommandPolicy>([
   ["pnpm", { subcommands: new Set(["test", "list", "why"]), flags: { short: "sgl", long: new Set(["json", "long", "depth", "silent"]) } }],
   ["yarn", { subcommands: new Set(["test", "list", "why"]), flags: { short: "sgl", long: new Set(["json", "depth", "silent"]) } }],
   // build 移出：-o 可写任意路径
-  ["cargo", { subcommands: new Set(["check", "test", "tree", "clippy", "fmt"]), flags: { short: "pv", long: new Set(["all", "workspace", "package", "lib", "bin", "tests", "quiet", "verbose", "offline", "locked", "all-features", "no-default-features", "features", "message-format"]) } }],
-  ["go", { subcommands: new Set(["test", "vet", "list"]), flags: { short: "vn", long: new Set(["run", "count", "race", "cover", "json", "short", "timeout", "tags"]) } }],
+  // fmt 移出：`cargo fmt -- <path>` 把路径直接转交 rustfmt 就地改写文件，
+  // 而 `--` 之后的位置参数标志检查根本够不着 —— 与 uniq 同一类逃逸
+  ["cargo", { subcommands: new Set(["check", "test", "tree", "clippy"]), flags: { short: "pv", long: new Set(["all", "workspace", "package", "lib", "bin", "tests", "quiet", "verbose", "offline", "locked", "all-features", "no-default-features", "features", "message-format"]) } }],
+  // go 用单横杠长标志（-run/-json/-count），必须是 word 风格，
+  // 否则 long 表根本不会被查到，全部误判为危险
+  ["go", { subcommands: new Set(["test", "vet", "list"]), flags: { style: "word", long: new Set(["v", "n", "run", "count", "race", "cover", "json", "short", "timeout", "tags"]) } }],
   // inspect 移出：容器 JSON 里的 Config.Env 常带 API key
   ["docker", { subcommands: new Set(["ps", "logs", "images"]), flags: { short: "afnqt", long: new Set(["all", "tail", "since", "until", "follow", "timestamps", "format", "filter", "no-trunc", "quiet"]) } }],
 ]);
@@ -122,12 +129,12 @@ export function parseCommand(command: string): string[] | undefined {
       tokens.push(entry);
       continue;
     }
-    // glob 只是文件名模式，展开不出命令，按位置参数处理
-    if (entry !== null && typeof entry === "object" && "op" in entry && entry.op === "glob") {
-      tokens.push(String((entry as { pattern?: unknown }).pattern ?? ""));
-      continue;
-    }
-    // 管道、重定向、串联、子 shell 等操作符
+    // 操作符（管道、重定向、串联、子 shell），以及 glob。
+    //
+    // glob 也放弃判定：我们只看得到未展开的模式串，看不到它实际会展开成
+    // 哪些 argv。仓库里若存在一个名字像标志的文件（write 工具在仓库内是
+    // 无条件放行的），`ls *` 展开后就会多出一个我们从未检查过的标志。
+    // 「评估的文本 ≠ 执行的 argv」正是本模块前四版反复栽的地方，不留缺口。
     return undefined;
   }
   return tokens;

@@ -46,10 +46,14 @@ test("parseCommand 对操作符、命令替换、变量展开一律放弃判定"
   assert.equal(parseCommand("echo $(whoami)"), undefined, "命令替换");
   assert.equal(parseCommand("echo `whoami`"), undefined, "反引号：shell-quote 不报 operator，需自行拦截");
   assert.equal(parseCommand("cat $SECRET"), undefined, "变量展开会被静默吃掉，必须拦");
+  assert.equal(parseCommand("find / {-delete,}"), undefined, "花括号展开：shell-quote 完全不做");
+  assert.equal(parseCommand("git log {--output=/etc/x,--oneline}"), undefined);
 });
 
-test("parseCommand 把 glob 当作位置参数", () => {
-  assert.deepEqual(parseCommand("ls *.ts"), ["ls", "*.ts"]);
+test("parseCommand 对 glob 也放弃判定 —— 看不到它会展开成什么", () => {
+  assert.equal(parseCommand("ls *.ts"), undefined);
+  assert.equal(parseCommand("cat *"), undefined);
+  assert.deepEqual(parseCommand("find . -name '*.ts'"), ["find", ".", "-name", "*.ts"], "引号包住的不是 glob");
 });
 
 test("flagsAllowed：短标志可合并，未列出的一律拒绝", () => {
@@ -106,6 +110,12 @@ test("白名单内的只读命令放行", () => {
   assert.equal(bash("wc -l README.md"), "safe");
   assert.equal(bash("pwd"), "safe");
   assert.equal(bash("date"), "safe");
+  assert.equal(bash("find . -name '*.ts'"), "safe", "引号包住的通配符是普通字符串");
+});
+
+test("未加引号的 glob 一律要批 —— 展开结果不可见", () => {
+  assert.equal(bash("ls *.ts"), "risky");
+  assert.equal(bash("cat *"), "risky");
 });
 
 test("白名单外的命令一律要批 —— 不必出现在任何危险清单里", () => {
@@ -157,6 +167,25 @@ test("回归 v3：加一对引号就能废掉整个标志白名单", () => {
 test("回归 v3：泄密路径", () => {
   assert.equal(bash("docker inspect mycontainer"), "risky", "容器 env 常带 API key");
   assert.equal(bash("kubectl get secret db-pass -o yaml"), "risky", "kubectl 整体移出白名单");
+});
+
+test("回归 v4：花括号展开 —— bash 展开后的 argv 与解析结果完全不同", () => {
+  // bash -c 'set -- find / {-delete,}' 的实际 argv 就是 find / -delete
+  assert.equal(bash("find / {-delete,}"), "risky");
+  assert.equal(bash("git log {--output=/etc/cron.d/pwn,--oneline}"), "risky");
+  assert.equal(bash("git log --oneline {--output=/etc/x,}"), "risky");
+});
+
+test("回归 v4：`--` 之后的位置参数够不着，故移出会经它改文件的子命令", () => {
+  assert.equal(bash("cargo fmt -- /etc/cron.d/pwn.rs"), "risky", "cargo fmt 转交 rustfmt 就地改写");
+  assert.equal(bash("cargo check"), "safe", "同表其余子命令不受影响");
+});
+
+test("go 用单横杠长标志，word 风格才查得到", () => {
+  assert.equal(bash("go test -run TestFoo"), "safe");
+  assert.equal(bash("go test -json"), "safe");
+  assert.equal(bash("go test -count 1"), "safe");
+  assert.equal(bash("go test -toolexec /bin/evil"), "risky", "未列出的标志仍要批");
 });
 
 test("元字符一票否决：管道、串联、命令替换、子 shell、换行", () => {
