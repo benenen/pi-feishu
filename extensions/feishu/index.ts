@@ -41,11 +41,27 @@ export default function (pi: ExtensionAPI) {
 
   const log = (msg: string) => console.error(`[pi-feishu] ${msg}`);
 
+  // gateway 只在 connect() 返回后才赋值，光靠它挡不住在途的第二次 start：
+  // autoStart 撞上手动 /feishu start，会建出两条 WS 连接抢同一批消息 ——
+  // 正是 autoStart 默认关闭想避免的那件事。
+  let starting: Promise<void> | undefined;
+
   async function start(cwd: string, notify: (msg: string) => void): Promise<void> {
+    if (starting) {
+      notify("飞书桥接正在启动中");
+      return starting;
+    }
     if (gateway) {
       notify("飞书桥接已在运行");
       return;
     }
+    starting = startInner(cwd, notify).finally(() => {
+      starting = undefined;
+    });
+    return starting;
+  }
+
+  async function startInner(cwd: string, notify: (msg: string) => void): Promise<void> {
     // 用局部常量承接，避免 `Config | undefined` 传进构造函数导致类型报错
     let cfg: Config;
     try {

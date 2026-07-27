@@ -1,5 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { realPathOrSelf } from "../extensions/feishu/bridge.ts";
 import {
   assessBashRisk,
   assessRisk,
@@ -25,6 +29,32 @@ test("isInside 用路径解析而非字符串前缀", () => {
 test("isInside 会跟随注入的符号链接解析器", () => {
   const resolve = (p: string) => (p === "/work/repo/link" ? "/etc" : p);
   assert.equal(isInside(ROOT, "link", resolve), false);
+});
+
+test("真实符号链接：目标不存在时也要跟到链接外", () => {
+  // 用真的 fs 符号链接，而不是注入一个恰好在不存在路径上也能成功的假解析器 ——
+  // realpath 正是在「目标还不存在」时抛错，那是 write 新文件的常态，
+  // 也正是之前逃逸的真实条件。
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-feishu-sym-"));
+  try {
+    const repo = path.join(tmp, "repo");
+    fs.mkdirSync(repo);
+    fs.symlinkSync(os.tmpdir(), path.join(repo, "escape"));
+
+    assert.equal(isInside(repo, "src/new.ts", realPathOrSelf), true, "仓库内新文件不误伤");
+    assert.equal(
+      isInside(repo, "escape/NEWFILE", realPathOrSelf),
+      false,
+      "经符号链接写仓库外的新文件必须判外",
+    );
+    assert.equal(
+      isInside(repo, "escape/deep/dir/NEWFILE", realPathOrSelf),
+      false,
+      "中间目录也不存在时同样要判外",
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("parseCommand 返回 shell 实际执行的 argv，引号被剥离", () => {
