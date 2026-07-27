@@ -216,7 +216,7 @@ pi.on("tool_call", async (event, ctx) => {
 
 **已知残余**：仓库内 `write` 是 safe、`npm test` 也是 safe，所以「改 package.json → 跑测试」这条链在边界内成立。这是「让代理在仓库里无人值守干活」的固有代价，不是判定漏洞；要堵就用 `strict`。
 
-**`strict`** —— 所有 `bash` 调用 + 所有 `write` / `edit` 都要批。适合完全不信任的环境，代价是一个回合可能要批十几次。
+**`strict`** —— 只有 `read` / `grep` / `find` / `ls` 免批，**其余一律要批**，包括扩展和 MCP 注册的自定义工具（它们能用任意名字，枚举危险名字必然漏）。适合完全不信任的环境，代价是一个回合可能要批十几次。
 
 判定必须防绕过：命令先做空白归一化和大小写归一化再匹配，路径先 `path.resolve` 再判断是否在 `repoRoot` 内（不能只做字符串前缀比较，否则 `../` 和符号链接能逃逸）。
 
@@ -252,6 +252,7 @@ pi.on("tool_call", async (event, ctx) => {
 | `autoStart` | boolean | `false` | `session_start` 时是否自动连接 |
 | `dmAllowlist` | string[] | `[]` | 允许单聊的 open_id |
 | `groupAllowlist` | string[] | `[]` | 允许的群 chat_id |
+| `approverAllowlist` | string[] | 同 `dmAllowlist` | 谁的卡片点击算数；飞书 SDK 不对卡片回调做白名单过滤 |
 | `requireMention` | boolean | `true` | 群聊是否需要 @ 机器人 |
 | `approvalMode` | `"balanced"` \| `"strict"` | `"balanced"` | 危险判定档位，见「危险判定」 |
 | `approvalTimeoutMs` | number | `120000` | 审批超时，超时即拒绝 |

@@ -11,8 +11,22 @@ function detailOf(req: ApprovalRequest): string {
   return JSON.stringify(req.input);
 }
 
+/**
+ * 这是人做审批决策时唯一看得见的东西，必须忠实呈现。
+ * - 反引号换成单引号：三个反引号会终止代码围栏，让命令后半截以粗体正文
+ *   的样子渲染，或者干脆藏到截断之外
+ * - 按码点截断：切断代理对会让整张卡片发送失败，等于静默瘫痪审批通道
+ */
+function safeDetail(text: string): string {
+  const neutralized = text.replace(/`/g, "'");
+  const points = Array.from(neutralized);
+  return points.length <= MAX_DETAIL_CHARS
+    ? neutralized
+    : `${points.slice(0, MAX_DETAIL_CHARS - 1).join("")}…`;
+}
+
 export function buildApprovalCard(id: string, req: ApprovalRequest): object {
-  const detail = detailOf(req).slice(0, MAX_DETAIL_CHARS);
+  const detail = safeDetail(detailOf(req));
   return {
     config: { wide_screen_mode: true },
     header: {

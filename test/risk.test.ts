@@ -275,3 +275,23 @@ test("strict：所有 bash/write/edit 都要批，读类工具仍放行", () => 
     "safe",
   );
 });
+
+test("strict：扩展/MCP 注册的自定义工具也要批", () => {
+  const t = (toolName: string) =>
+    assessRisk({ toolName, input: {}, mode: "strict", repoRoot: ROOT });
+  assert.equal(t("mcp__github__create_pr"), "risky", "MCP 工具不能因为名字没见过就放行");
+  assert.equal(t("my_custom_deploy"), "risky");
+  assert.equal(t("bash"), "risky");
+  assert.equal(t("write"), "risky");
+  assert.equal(t("read"), "safe");
+  assert.equal(t("grep"), "safe");
+  assert.equal(t("find"), "safe");
+  assert.equal(t("ls"), "safe");
+});
+
+test("balanced：未知工具仍放行（判定只覆盖 bash/write/edit）", () => {
+  assert.equal(
+    assessRisk({ toolName: "mcp__x__y", input: {}, mode: "balanced", repoRoot: ROOT }),
+    "safe",
+  );
+});

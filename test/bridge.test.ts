@@ -87,6 +87,7 @@ const CONFIG = {
   autoStart: false,
   dmAllowlist: ["ou_1"],
   groupAllowlist: [],
+  approverAllowlist: ["ou_1"],
   requireMention: true,
   approvalMode: "balanced" as const,
   approvalTimeoutMs: 1000,

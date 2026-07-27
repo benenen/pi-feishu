@@ -121,3 +121,37 @@ test("loadConfig：文件缺失不产生问题，仍用其余来源", () => {
   });
   assert.equal(c.appId, "cli_x");
 });
+
+test("approverAllowlist 默认沿用 dmAllowlist", () => {
+  const c = loadConfig({ files: [base], env: {}, cwd: "/w" });
+  assert.deepEqual(c.approverAllowlist, ["ou_1"]);
+});
+
+test("approverAllowlist 可以单独指定", () => {
+  const c = loadConfig({
+    files: [{ ...base, approverAllowlist: ["ou_boss"] }],
+    env: {},
+    cwd: "/w",
+  });
+  assert.deepEqual(c.approverAllowlist, ["ou_boss"]);
+});
+
+test("只配 groupAllowlist 时必须显式指定审批人，否则群里谁都能批", () => {
+  const err = throwsConfigError(() =>
+    loadConfig({
+      files: [{ appId: "a", appSecret: "b", groupAllowlist: ["oc_1"] }],
+      env: {},
+      cwd: "/w",
+    }),
+  );
+  assert.ok(err.problems.some((p) => p.includes("approverAllowlist")));
+});
+
+test("只配 groupAllowlist 且指定了审批人就能通过", () => {
+  const c = loadConfig({
+    files: [{ appId: "a", appSecret: "b", groupAllowlist: ["oc_1"], approverAllowlist: ["ou_x"] }],
+    env: {},
+    cwd: "/w",
+  });
+  assert.deepEqual(c.approverAllowlist, ["ou_x"]);
+});

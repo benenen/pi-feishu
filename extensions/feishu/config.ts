@@ -9,6 +9,8 @@ export interface Config {
   autoStart: boolean;
   dmAllowlist: string[];
   groupAllowlist: string[];
+  /** 谁的卡片点击算数。飞书 SDK 不对 card.action.trigger 做任何白名单过滤 */
+  approverAllowlist: string[];
   requireMention: boolean;
   approvalMode: ApprovalMode;
   approvalTimeoutMs: number;
@@ -119,6 +121,16 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
     problems.push("dmAllowlist 和 groupAllowlist 不能同时为空，否则没人能触达机器人");
   }
 
+  // 卡片点击不经飞书 SDK 的策略管道，必须自己鉴权。默认沿用 dmAllowlist；
+  // 只配了 groupAllowlist 时若不显式指定，群里任何人都能点「允许」。
+  const approverAllowlist =
+    readStringArray(merged.approverAllowlist, "approverAllowlist", problems) ?? dmAllowlist;
+  if (approverAllowlist.length === 0) {
+    problems.push(
+      "approverAllowlist 为空：卡片审批将无人可批。只配了 groupAllowlist 时必须显式指定谁能批准",
+    );
+  }
+
   let approvalMode: ApprovalMode = "balanced";
   if (merged.approvalMode !== undefined) {
     if (merged.approvalMode === "balanced" || merged.approvalMode === "strict") {
@@ -145,6 +157,7 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
     autoStart,
     dmAllowlist,
     groupAllowlist,
+    approverAllowlist,
     requireMention,
     approvalMode,
     approvalTimeoutMs,

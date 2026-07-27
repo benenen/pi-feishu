@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createLarkChannel } from "@larksuiteoapi/node-sdk";
 import type { LarkChannel } from "@larksuiteoapi/node-sdk";
 import type { AppendSink } from "./turn-stream.ts";
@@ -23,7 +24,6 @@ export class FeishuGateway {
   #bound: string | undefined;
   #messageHandler: ((msg: InboundMessage) => void) | undefined;
   #approvals = new ApprovalRegistry();
-  #seq = 0;
 
   // strip-only 模式不支持构造函数参数属性，依赖写成显式字段
   readonly #config: Config;
@@ -80,6 +80,20 @@ export class FeishuGateway {
     channel.on("cardAction", (evt) => {
       const action = parseApprovalAction(evt.action.value);
       if (!action) return;
+
+      // 飞书 SDK 只对 im.message.receive_v1 走完整的策略管道；
+      // card.action.trigger 只有去重和串行化，没有任何白名单过滤。
+      // 不自己鉴权的话，群里任何看得见卡片的人都能点「允许」——
+      // 让 agent 干活的人自己批准自己，闸门等于没有。
+      if (evt.chatId !== this.#bound) {
+        this.#log(`忽略来自未绑定会话的卡片点击：${evt.chatId}`);
+        return;
+      }
+      if (!this.#config.approverAllowlist.includes(evt.operator.openId)) {
+        this.#log(`忽略非授权审批人的卡片点击：${evt.operator.openId}`);
+        return;
+      }
+
       const messageId = this.#approvals.settle(action.id, {
         allow: action.allow,
         reason: action.allow ? "飞书批准" : "飞书拒绝",
@@ -157,7 +171,9 @@ export class FeishuGateway {
       signal.addEventListener("abort", onAbort, { once: true });
     });
 
-    const id = `ap-${++this.#seq}`;
+    // 随机 id：每实例从 1 开始重编号的话，旧会话残留的卡片被点一下
+    // 就会兑现新会话的 ap-1 —— 操作员从未见过的审批被凭空批准
+    const id = `ap-${randomUUID()}`;
     try {
       const result = await channel.send(to, { card: buildApprovalCard(id, req) });
 

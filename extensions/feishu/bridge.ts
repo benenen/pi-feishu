@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import type { AppendSink } from "./turn-stream.ts";
 import { TurnStream } from "./turn-stream.ts";
 import { assessRisk, type PathResolver, type Risk } from "./risk.ts";
@@ -63,12 +64,27 @@ export function shouldAccept(gateway: { boundChatId?: string }, chatId: string):
   return gateway.boundChatId === undefined || gateway.boundChatId === chatId;
 }
 
-/** 文件可能尚未存在（write 新文件），此时退回原路径 */
+/**
+ * 解析符号链接。目标常常还不存在 —— `write` 新文件正是如此 —— 直接
+ * realpath 会抛错。逐级上溯到最近的**已存在**祖先做 realpath，再把剩下的
+ * 路径段拼回去；否则「仓库里有个指向仓库外的符号链接目录，往它下面写新
+ * 文件」会被判成仓库内，这是 balanced 档最主要的逃逸口。
+ */
 export const realPathOrSelf: PathResolver = (p) => {
-  try {
-    return fs.realpathSync.native(p);
-  } catch {
-    return p;
+  const abs = path.resolve(p);
+  let current = abs;
+  const suffix: string[] = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync.native(current);
+      return suffix.length === 0 ? real : path.join(real, ...suffix.slice().reverse());
+    } catch {
+      const parent = path.dirname(current);
+      // 一路到根都不存在，只能按字面路径判
+      if (parent === current) return abs;
+      suffix.push(path.basename(current));
+      current = parent;
+    }
   }
 };
 

@@ -133,3 +133,22 @@ test("无 command/path 的工具，卡片正文回退到序列化 input", () => 
   assert.ok(json.includes("weird"), "标题应含工具名");
   assert.ok(json.includes('{\\"a\\":1}'), "正文应含序列化后的 input");
 });
+
+test("卡片正文中和反引号，防止伪造出无害的渲染", () => {
+  const evil = "ls\n```\n**看起来人畜无害**\n```\nrm -rf /";
+  const json = JSON.stringify(buildApprovalCard("ap-1", { toolName: "bash", input: { command: evil } }));
+  assert.ok(json.includes("rm -rf /"), "真正的命令必须仍然可见");
+  assert.equal(json.includes("\\u0060\\u0060\\u0060") || json.includes("```"), true);
+  // 正文里除了包裹用的围栏，不应再有反引号
+  const body = JSON.parse(json).elements[0].text.content as string;
+  const inner = body.slice(4, -4);
+  assert.equal(inner.includes("`"), false, "命令内的反引号应已被中和");
+});
+
+test("卡片正文按码点截断，不会切碎 emoji 导致整张卡片发不出去", () => {
+  const json = JSON.stringify(
+    buildApprovalCard("ap-1", { toolName: "bash", input: { command: "😀".repeat(2000) } }),
+  );
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert.equal(lone.test(json), false);
+});

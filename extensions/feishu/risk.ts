@@ -9,6 +9,9 @@ const identity: PathResolver = (p) => p;
 
 const WRITER_TOOLS = new Set(["write", "edit"]);
 
+/** strict 档唯一免审批的工具。其余一律要批，包括扩展/MCP 注册的自定义工具。 */
+const STRICT_SAFE_TOOLS = new Set(["read", "grep", "find", "ls"]);
+
 /**
  * shell-quote 不会把这几类东西报成 operator，必须在原始串上先拒掉 ——
  * 它们都会让 token 流与 shell 实际执行的 argv 脱节：
@@ -224,7 +227,10 @@ export function assessRisk({
   resolvePath = identity,
 }: AssessArgs): Risk {
   if (mode === "strict") {
-    return toolName === "bash" || WRITER_TOOLS.has(toolName) ? "risky" : "safe";
+    // 安全清单而非危险清单：扩展和 MCP 服务器能注册任意名字的工具，
+    // 它们照样会写文件、起子进程。枚举危险名字必然漏，
+    // 而 strict 卖点正是「完全不信任的环境」。
+    return STRICT_SAFE_TOOLS.has(toolName) ? "safe" : "risky";
   }
 
   if (WRITER_TOOLS.has(toolName)) {

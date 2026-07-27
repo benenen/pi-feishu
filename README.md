@@ -33,12 +33,13 @@ pi install git:github.com/you/pi-feishu
 | `autoStart` | `false` | 会话启动时自动连接。**多开 pi 会抢消息，保持 false 更安全** |
 | `dmAllowlist` | `[]` | 允许单聊的 open_id |
 | `groupAllowlist` | `[]` | 允许的群 chat_id |
+| `approverAllowlist` | 同 `dmAllowlist` | **谁的卡片点击算数**。飞书 SDK 不对卡片回调做白名单过滤，只配 `groupAllowlist` 时必须显式指定，否则群里任何人都能点「允许」 |
 | `requireMention` | `true` | 群聊是否需要 @ 机器人 |
 | `approvalMode` | `"balanced"` | `balanced` 只拦破坏性操作；`strict` 所有 bash/write/edit 都要批 |
 | `approvalTimeoutMs` | `120000` | 审批超时，超时即拒绝 |
 | `repoRoot` | 当前 cwd | 判定「写到范围外」的基准 |
 
-`dmAllowlist` 和 `groupAllowlist` 不能同时为空。
+`dmAllowlist` 和 `groupAllowlist` 不能同时为空；`approverAllowlist` 解析后也不能为空。
 
 ## 飞书应用配置
 
@@ -93,4 +94,6 @@ Node ≥ 24（依赖原生 TypeScript 类型剥离，无构建步骤）。
 - [ ] 故意填错 `appSecret` → `/feishu start` 报出中文的「飞书连接失败：…」，而不是 pi 的通用错误
 - [ ] 故意把 `feishu.json` 写成非法 JSON → 报「不是合法的 JSON」，而不是「缺少 appId」
 - [ ] 在飞书里发 `/feishu stop` → **飞书这一侧**能收到「飞书桥接已停止」的回执
+- [ ] 群场景：让**不在** `approverAllowlist` 里的成员点「允许」→ 无效，日志出现「忽略非授权审批人」
+- [ ] 仓库里建一个指向仓库外的符号链接目录，让 agent 往它下面写新文件 → 弹审批
 - [ ] `/feishu stop` 后飞书消息不再进入 pi
