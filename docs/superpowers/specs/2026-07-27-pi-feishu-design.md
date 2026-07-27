@@ -183,25 +183,29 @@ pi.on("tool_call", async (event, ctx) => {
 
 这**不是**「不执行任意代码」。`npm test` 跑的是仓库自己的测试脚本 —— 在边界之内，理应放行，否则编码代理没法干活。而 `git log --output=/etc/cron.d/pwn` 越界，必须拦。
 
-### 两次失败的迭代（都已实测证伪）
+### 三次失败的迭代（都已实测证伪）
 
-- **v1 黑名单**（枚举危险命令）：8 处零成本绕过 —— `echo hi>/etc/x`（少个空格）、`dd of=… if=…`（换参数序）、`chmod 0777`（前导零）、`git -c k=v push --force`（插全局选项）、`curl -o x.sh …; bash x.sh`（分号拆开）等；且 `find / -delete`、`python3 -c "shutil.rmtree('/')"` 根本不含关键字。
-- **v2 命令白名单**（只看命令名，不看标志）：实测 `git log -1 --format=format:"* * * * * root touch /tmp/pwned" --output=./PWNED.txt` **确实把任意内容写进了任意路径**，全程无 shell 元字符。`sort -o FILE`、`find -fprint0 FILE` 同样可写。
+| 版本 | 做法 | 被什么打穿 |
+|---|---|---|
+| v1 | 正则黑名单，枚举危险命令 | 8 处零成本绕过：`echo hi>/etc/x`（少个空格）、`dd of=… if=…`（换参数序）、`chmod 0777`（前导零）、`curl …; bash …`（分号拆开）等；`find / -delete`、`python3 -c "shutil.rmtree('/')"` 根本不含关键字 |
+| v2 | 命令名白名单 | 只看命令不看标志。`git log -1 --format=format:evil --output=./PWNED.txt` 实测把任意内容写进任意路径，全程无元字符；`sort -o`、`find -fprint0` 同理 |
+| v3 | 标志也白名单化 | 自己 split 出的 token 流 ≠ shell 实际执行的 argv。`git log '--output=/etc/x'` 加一对引号，token 不以 `-` 开头就被当成位置参数放行；`uniq IN OUT` 第二个位置参数即输出文件，标志检查完全够不着 |
 
-根因相同：几乎每个「只读命令」都带着能写文件的标志。
+共同教训：**用字符串匹配去分析一门没有解析的语言，每轮都会冒出新的绕过类别。** v4 因此引入 `shell-quote`，让 token 流等于 shell 实际会执行的 argv —— 从结构上关掉引号这一类，而不是再打一个补丁。
 
 ### 判定顺序
 
-1. 含任一 shell 元字符（`| & ; < > $ \` ( ) { }`、换行、反斜杠）→ **risky**。
-2. 首 token（小写后）在「子命令表」里：第二个 token 必须属于该表的只读子命令集，**且其余标志全部通过标志白名单**，否则 risky。
-3. 首 token 在「命令表」里：**标志全部通过标志白名单**，否则 risky。
-4. 其余一律 **risky**。
+1. 原始串含反引号或 `$` → **risky**。这两样 `shell-quote` 不报 operator：反引号原样变成普通字符串 token，`$VAR` 被静默展开成空串（`cat $SECRET` 解析成 `["cat", ""]`），两者都会让 token 流与实际执行脱节。
+2. `parse()` 结果里出现任何 operator 对象（管道、重定向、串联、子 shell）→ **risky**。`glob` 除外，它只是文件名模式，按位置参数处理。
+3. 首 token（小写后）在「子命令表」里：第二个 token 必须属于该表的只读子命令集，**且其余标志全部通过标志白名单**，否则 risky。
+4. 首 token 在「命令表」里：**标志全部通过标志白名单**，否则 risky。
+5. 其余一律 **risky**。
 
 标志白名单按命令配置：`cluster` 风格（`-la` 拆成字母逐个校验）或 `word` 风格（`find` 的 `-name` 整词查表）。出现未列出的 `-xxx` 就弹审批。
 
 标志检查**保留大小写**（只有命令名和子命令查表时小写）：`-A` 与 `-a` 在多数命令里语义不同，混同会放进未授权的标志。
 
-已剔除的条目及理由：`sort`/`tree`（`-o` 写文件）、`hostname`（可设置）、`printenv`/`env`（向聊天记录泄露密钥）、`git branch`/`tag`/`remote`（删分支、删标签、改远端）、`npm run`（执行任意脚本）、`go build`（`-o` 写任意路径）、`man`（起分页器）。
+已剔除的条目及理由：`sort`/`tree`（`-o` 写文件）、`uniq`（第二个位置参数即输出文件）、`hostname`（可设置）、`printenv`/`env`（向聊天记录泄露密钥）、`git branch`/`tag`/`remote`（删分支、删标签、改远端）、`npm run`（执行任意脚本）、`go build`（`-o` 写任意路径）、`docker inspect`（容器 JSON 的 `Config.Env` 常带 API key）、`kubectl`（`get secret -o yaml` 直接吐凭据）、`man`（起分页器）。
 
 `write` / `edit`：目标路径 `path.resolve` 后（并跟随符号链接）在 `repoRoot` 内 → safe，否则 risky。
 

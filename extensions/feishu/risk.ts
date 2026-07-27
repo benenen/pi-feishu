@@ -1,4 +1,5 @@
 import path from "node:path";
+import { parse } from "shell-quote";
 import type { ApprovalMode } from "./config.ts";
 
 export type Risk = "safe" | "risky";
@@ -9,11 +10,12 @@ const identity: PathResolver = (p) => p;
 const WRITER_TOOLS = new Set(["write", "edit"]);
 
 /**
- * 任一 shell 元字符出现即判危险 —— 重定向、管道、命令替换、命令串联、
- * 子 shell 全靠这一条拦下，不必逐一枚举危险写法。
- * 刻意不解析引号：引号内的括号会被误判为危险，多弹一次审批，方向偏安全。
+ * shell-quote 不会把这两类东西报成 operator，必须在原始串上先拒掉：
+ *   反引号 —— `whoami` 会原样变成一个普通字符串 token
+ *   $      —— $VAR 被静默展开成空串，`cat $SECRET` 解析成 ["cat", ""]
+ * 两者都能让 token 流与 shell 实际执行的内容脱节。
  */
-const SHELL_METACHARACTERS = /[|&;<>$`(){}\n\r\\]/;
+const RAW_FORBIDDEN = /[`$]/;
 
 /**
  * 允许的标志。命令一旦出现未列出的 `-xxx` 就判危险。
@@ -27,7 +29,7 @@ export interface FlagPolicy {
   short?: string;
   /** 允许的长标志名，不含前缀 `--`，不含 `=value` */
   long: ReadonlySet<string>;
-  /** 是否允许 `-5` 这种数字标志（git log -5、head -20） */
+  /** 是否允许 `-5` 这种数字标志（git log -5、head -20、find -mtime -5） */
   numeric?: boolean;
 }
 
@@ -35,18 +37,17 @@ export interface FlagPolicy {
 const READ_ONLY_COMMANDS = new Map<string, FlagPolicy>([
   ["ls", { short: "laAhRrtSU1dFi", long: new Set(["all", "almost-all", "human-readable", "reverse", "recursive", "sort", "time", "directory", "classify", "color"]) }],
   ["pwd", { short: "LP", long: new Set() }],
-  ["cat", { short: "nbEsTA", long: new Set(["number", "number-nonblank", "show-ends", "show-all"]) }],
+  ["cat", { short: "nbEsTAv", long: new Set(["number", "number-nonblank", "show-ends", "show-all"]) }],
   ["head", { short: "nqvc", numeric: true, long: new Set(["lines", "bytes", "quiet", "verbose"]) }],
   ["tail", { short: "nfqvc", numeric: true, long: new Set(["lines", "bytes", "follow", "quiet", "verbose"]) }],
   ["wc", { short: "lwcmL", long: new Set(["lines", "words", "bytes", "chars", "max-line-length"]) }],
   ["file", { short: "biL", long: new Set(["mime", "mime-type", "brief"]) }],
   ["stat", { short: "cfLt", long: new Set(["format", "printf", "dereference", "terse", "file-system"]) }],
-  ["du", { short: "shcamkb", long: new Set(["summarize", "human-readable", "max-depth", "apparent-size", "total", "all"]) }],
+  ["du", { short: "shcamkb", numeric: true, long: new Set(["summarize", "human-readable", "max-depth", "apparent-size", "total", "all"]) }],
   ["df", { short: "hTikaP", long: new Set(["human-readable", "print-type", "inodes", "all", "portability"]) }],
   ["grep", { short: "rRnivEFGPwcLloqsaHhbxzZeuABC", numeric: true, long: new Set(["recursive", "dereference-recursive", "line-number", "ignore-case", "invert-match", "extended-regexp", "fixed-strings", "basic-regexp", "perl-regexp", "word-regexp", "count", "files-with-matches", "files-without-match", "only-matching", "quiet", "no-messages", "with-filename", "no-filename", "byte-offset", "after-context", "before-context", "context", "include", "exclude", "exclude-dir", "color", "colour", "binary-files", "max-count", "text"]) }],
-  ["rg", { short: "nivewcLloqSuHhpztgFA BC", numeric: true, long: new Set(["glob", "iglob", "type", "type-not", "hidden", "no-ignore", "ignore-case", "line-number", "count", "count-matches", "files-with-matches", "only-matching", "context", "after-context", "before-context", "max-count", "color", "smart-case", "fixed-strings", "word-regexp", "pretty", "json", "no-heading"]) }],
+  ["rg", { short: "nivewcLloqSuHhpztgFABC", numeric: true, long: new Set(["glob", "iglob", "type", "type-not", "hidden", "no-ignore", "ignore-case", "line-number", "count", "count-matches", "files-with-matches", "only-matching", "context", "after-context", "before-context", "max-count", "color", "smart-case", "fixed-strings", "word-regexp", "pretty", "json", "no-heading"]) }],
   ["diff", { short: "urUqiwbBNaczpst", numeric: true, long: new Set(["unified", "recursive", "brief", "ignore-case", "ignore-all-space", "new-file", "side-by-side", "color", "text"]) }],
-  ["uniq", { short: "cdiuzw", long: new Set(["count", "repeated", "unique", "ignore-case"]) }],
   ["cut", { short: "dfcsb", long: new Set(["delimiter", "fields", "characters", "bytes", "only-delimited"]) }],
   ["basename", { short: "asz", long: new Set(["suffix", "multiple", "zero"]) }],
   ["dirname", { short: "z", long: new Set(["zero"]) }],
@@ -61,8 +62,9 @@ const READ_ONLY_COMMANDS = new Map<string, FlagPolicy>([
   ["which", { short: "a", long: new Set(["all"]) }],
   ["type", { short: "at", long: new Set() }],
   ["ps", { short: "efauxwlHjLTcno", long: new Set(["pid", "user", "format", "sort", "no-headers", "forest"]) }],
-  // find 的 primary 是单横杠长词，用 word 风格；-delete/-exec*/-ok*/-fprint* 不在表里，天然被拦
-  ["find", { style: "word", long: new Set([
+  // find 的 primary 是单横杠长词，用 word 风格；
+  // -delete/-exec*/-ok*/-fprint* 不在表里，天然被拦
+  ["find", { style: "word", numeric: true, long: new Set([
     "L", "H", "P", "name", "iname", "path", "ipath", "regex", "iregex", "type",
     "maxdepth", "mindepth", "size", "empty", "mtime", "mmin", "newer", "newermt",
     "user", "group", "perm", "links", "lname", "samefile", "print", "print0",
@@ -85,19 +87,50 @@ const READ_ONLY_SUBCOMMANDS = new Map<string, SubcommandPolicy>([
     flags: { short: "npsuvzSwWMC", numeric: true, long: new Set(["oneline", "graph", "stat", "numstat", "name-only", "name-status", "patch", "no-patch", "no-pager", "decorate", "no-color", "color", "abbrev-commit", "pretty", "format", "date", "since", "until", "author", "committer", "grep", "follow", "reverse", "first-parent", "merges", "no-merges", "cached", "staged", "word-diff", "unified", "short", "porcelain", "all", "max-count", "skip", "summary"]) },
   }],
   // run 移出：执行 package.json 里的任意脚本
-  ["npm", { subcommands: new Set(["test", "ls", "list", "outdated", "view", "why"]), flags: { short: "sgl", long: new Set(["json", "long", "depth", "silent", "workspace", "workspaces"]) } }],
+  ["npm", { subcommands: new Set(["test", "ls", "list", "outdated", "why"]), flags: { short: "sgl", long: new Set(["json", "long", "depth", "silent", "workspace", "workspaces"]) } }],
   ["pnpm", { subcommands: new Set(["test", "list", "why"]), flags: { short: "sgl", long: new Set(["json", "long", "depth", "silent"]) } }],
   ["yarn", { subcommands: new Set(["test", "list", "why"]), flags: { short: "sgl", long: new Set(["json", "depth", "silent"]) } }],
   // build 移出：-o 可写任意路径
   ["cargo", { subcommands: new Set(["check", "test", "tree", "clippy", "fmt"]), flags: { short: "pv", long: new Set(["all", "workspace", "package", "lib", "bin", "tests", "quiet", "verbose", "offline", "locked", "all-features", "no-default-features", "features", "message-format"]) } }],
   ["go", { subcommands: new Set(["test", "vet", "list"]), flags: { short: "vn", long: new Set(["run", "count", "race", "cover", "json", "short", "timeout", "tags"]) } }],
-  ["docker", { subcommands: new Set(["ps", "logs", "images", "inspect"]), flags: { short: "afnqt", long: new Set(["all", "tail", "since", "until", "follow", "timestamps", "format", "filter", "no-trunc", "quiet"]) } }],
-  ["kubectl", { subcommands: new Set(["get", "describe", "logs"]), flags: { short: "noAlfc", long: new Set(["namespace", "output", "all-namespaces", "selector", "follow", "tail", "container", "since"]) } }],
+  // inspect 移出：容器 JSON 里的 Config.Env 常带 API key
+  ["docker", { subcommands: new Set(["ps", "logs", "images"]), flags: { short: "afnqt", long: new Set(["all", "tail", "since", "until", "follow", "timestamps", "format", "filter", "no-trunc", "quiet"]) } }],
 ]);
 
-/** 只折叠空白，**不**改大小写 —— 标志的大小写有语义 */
-export function normalizeCommand(cmd: string): string {
-  return cmd.replace(/\s+/g, " ").trim();
+/**
+ * 把命令解析成 shell 实际会执行的 argv。
+ * 返回 undefined 表示「无法安全判定」—— 出现了操作符、命令替换、
+ * 变量展开，或解析本身失败。调用方一律按危险处理。
+ *
+ * 用真正的 shell 解析器而不是正则 + split，是因为字符串层面的 token 流
+ * 会与 shell 实际执行的内容脱节：`'--output=/etc/x'` 带引号时不以 `-`
+ * 开头，naive 分词会当成位置参数放过，而 shell 剥掉引号后它仍是标志。
+ */
+export function parseCommand(command: string): string[] | undefined {
+  if (RAW_FORBIDDEN.test(command)) return undefined;
+
+  let entries: ReturnType<typeof parse>;
+  try {
+    entries = parse(command);
+  } catch {
+    return undefined;
+  }
+
+  const tokens: string[] = [];
+  for (const entry of entries) {
+    if (typeof entry === "string") {
+      tokens.push(entry);
+      continue;
+    }
+    // glob 只是文件名模式，展开不出命令，按位置参数处理
+    if (entry !== null && typeof entry === "object" && "op" in entry && entry.op === "glob") {
+      tokens.push(String((entry as { pattern?: unknown }).pattern ?? ""));
+      continue;
+    }
+    // 管道、重定向、串联、子 shell 等操作符
+    return undefined;
+  }
+  return tokens;
 }
 
 export function isInside(
@@ -133,8 +166,13 @@ export function flagsAllowed(tokens: readonly string[], policy: FlagPolicy): boo
       continue;
     }
 
-    // 短标志簇：-la、-A3
-    const letters = body.replace(/\d+$/, "");
+    // 短标志簇：-la、-A3。尾部数字只有在明确允许数字标志时才剥离，
+    // 否则 -L5 会绕过 numeric 门禁被当成 -L 放行。
+    let letters = body;
+    if (/\d+$/.test(letters)) {
+      if (policy.numeric !== true) return false;
+      letters = letters.replace(/\d+$/, "");
+    }
     if (letters === "") return false;
     const short = policy.short ?? "";
     for (const ch of letters) {
@@ -145,10 +183,9 @@ export function flagsAllowed(tokens: readonly string[], policy: FlagPolicy): boo
 }
 
 export function assessBashRisk(command: string): Risk {
-  // 元字符检查用原始串，归一化会丢掉换行
-  if (SHELL_METACHARACTERS.test(command)) return "risky";
+  const tokens = parseCommand(command);
+  if (tokens === undefined) return "risky";
 
-  const tokens = normalizeCommand(command).split(" ").filter((t) => t !== "");
   const head = tokens[0]?.toLowerCase();
   if (head === undefined) return "risky";
 

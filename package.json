@@ -2,18 +2,23 @@
   "name": "pi-feishu",
   "version": "0.1.0",
   "description": "把当前 pi 会话桥接到飞书的 pi 扩展",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "license": "MIT",
   "type": "module",
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": [
+      "./extensions"
+    ]
   },
   "scripts": {
     "test": "node --test \"test/**/*.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.71.1"
+    "@larksuiteoapi/node-sdk": "^1.71.1",
+    "shell-quote": "^1.10.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
@@ -21,6 +26,7 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@types/node": "^24.0.0",
+    "@types/shell-quote": "^1.7.5",
     "typescript": "^5.9.0"
   },
   "engines": {
