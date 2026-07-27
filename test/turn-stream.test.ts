@@ -94,3 +94,42 @@ test("pump 在 finish 前不会返回", async () => {
   await pumping;
   assert.equal(done, true);
 });
+
+test("第二个并发 pump 被拒绝，而不是让前一个永久挂起", async () => {
+  const { sink } = recorder();
+  const s = new TurnStream();
+  const first = s.pump(sink);
+
+  await assert.rejects(() => s.pump(sink), /只能有一个 pump/);
+
+  // 第一个 pump 仍然正常工作
+  s.push("x");
+  s.finish();
+  await first;
+});
+
+test("pump 返回后可以再次 pump", async () => {
+  const { chunks, sink } = recorder();
+  const s = new TurnStream();
+  s.push("a");
+  s.finish();
+  await s.pump(sink);
+  await s.pump(sink);
+  assert.equal(chunks.join(""), "a");
+});
+
+test("sink.append 抛错时异常抛给调用方，且不会卡住后续 pump", async () => {
+  const s = new TurnStream();
+  const boom = {
+    async append() {
+      throw new Error("飞书发送失败");
+    },
+  };
+  s.push("a");
+  s.finish();
+  await assert.rejects(() => s.pump(boom), /飞书发送失败/);
+
+  const { chunks, sink } = recorder();
+  await s.pump(sink);
+  assert.deepEqual(chunks, [], "抛错那批已出队，不会重投");
+});
