@@ -175,21 +175,39 @@ pi.on("tool_call", async (event, ctx) => {
 
 `assessRisk(toolName, input, config) => "safe" | "risky"`，纯函数。
 
-**`balanced`（默认）** —— **枚举安全，而不是枚举危险**。
+**`balanced`（默认）** —— **枚举安全，而不是枚举危险**，且要枚举到**标志**这一层。
 
-放弃黑名单的理由：危险清单枚举不完。初版用正则匹配 `rm -rf`/`sudo`/`dd` 等模式，实测有 8 处零成本绕过 —— `echo hi>/etc/x`（少个空格）、`dd of=… if=…`（换参数序）、`chmod 0777`（加前导零）、`curl -o x.sh …; bash x.sh`（分号拆开）等等，且 `find / -delete`、`python3 -c "shutil.rmtree('/')"` 这类根本不含关键字。补正则补不完，与「宁可多问，别漏」直接冲突。
+### balanced 的承诺
 
-`bash` 判定按顺序：
+> **`repoRoot` 之外的任何东西，不经人工批准动不了。**
 
-1. 命令含任一 shell 元字符 —— `| & ; < > $ \` ( ) { }`、换行、反斜杠 —— 一律 **risky**。重定向、管道、命令替换、命令串联全部由这一条拦下。
-2. 首个 token 是 `find`：带 `-delete` / `-exec` / `-execdir` / `-ok` / `-okdir` / `-fls` / `-fprint` 时 risky，否则 safe。
-3. 首个 token 属于「需看子命令」表（`git` / `npm` / `pnpm` / `yarn` / `cargo` / `go` / `docker` / `kubectl`）：第二个 token 在该表的只读集合里才 safe，否则 risky。
-4. 首个 token 在只读命令白名单里 → safe。
-5. 其余一律 **risky**。
+这**不是**「不执行任意代码」。`npm test` 跑的是仓库自己的测试脚本 —— 在边界之内，理应放行，否则编码代理没法干活。而 `git log --output=/etc/cron.d/pwn` 越界，必须拦。
+
+### 两次失败的迭代（都已实测证伪）
+
+- **v1 黑名单**（枚举危险命令）：8 处零成本绕过 —— `echo hi>/etc/x`（少个空格）、`dd of=… if=…`（换参数序）、`chmod 0777`（前导零）、`git -c k=v push --force`（插全局选项）、`curl -o x.sh …; bash x.sh`（分号拆开）等；且 `find / -delete`、`python3 -c "shutil.rmtree('/')"` 根本不含关键字。
+- **v2 命令白名单**（只看命令名，不看标志）：实测 `git log -1 --format=format:"* * * * * root touch /tmp/pwned" --output=./PWNED.txt` **确实把任意内容写进了任意路径**，全程无 shell 元字符。`sort -o FILE`、`find -fprint0 FILE` 同样可写。
+
+根因相同：几乎每个「只读命令」都带着能写文件的标志。
+
+### 判定顺序
+
+1. 含任一 shell 元字符（`| & ; < > $ \` ( ) { }`、换行、反斜杠）→ **risky**。
+2. 首 token（小写后）在「子命令表」里：第二个 token 必须属于该表的只读子命令集，**且其余标志全部通过标志白名单**，否则 risky。
+3. 首 token 在「命令表」里：**标志全部通过标志白名单**，否则 risky。
+4. 其余一律 **risky**。
+
+标志白名单按命令配置：`cluster` 风格（`-la` 拆成字母逐个校验）或 `word` 风格（`find` 的 `-name` 整词查表）。出现未列出的 `-xxx` 就弹审批。
+
+标志检查**保留大小写**（只有命令名和子命令查表时小写）：`-A` 与 `-a` 在多数命令里语义不同，混同会放进未授权的标志。
+
+已剔除的条目及理由：`sort`/`tree`（`-o` 写文件）、`hostname`（可设置）、`printenv`/`env`（向聊天记录泄露密钥）、`git branch`/`tag`/`remote`（删分支、删标签、改远端）、`npm run`（执行任意脚本）、`go build`（`-o` 写任意路径）、`man`（起分页器）。
 
 `write` / `edit`：目标路径 `path.resolve` 后（并跟随符号链接）在 `repoRoot` 内 → safe，否则 risky。
 
 刻意不做引号解析：`grep "foo(bar)" .` 里被引号包住的括号也会判为 risky，多弹一次审批。误判方向是**偏安全**的，可接受。
+
+**已知残余**：仓库内 `write` 是 safe、`npm test` 也是 safe，所以「改 package.json → 跑测试」这条链在边界内成立。这是「让代理在仓库里无人值守干活」的固有代价，不是判定漏洞；要堵就用 `strict`。
 
 **`strict`** —— 所有 `bash` 调用 + 所有 `write` / `edit` 都要批。适合完全不信任的环境，代价是一个回合可能要批十几次。
 
