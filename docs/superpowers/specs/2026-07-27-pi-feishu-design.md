@@ -175,16 +175,25 @@ pi.on("tool_call", async (event, ctx) => {
 
 `assessRisk(toolName, input, config) => "safe" | "risky"`，纯函数。
 
-**`balanced`（默认）** —— 只拦真正有破坏力的：
+**`balanced`（默认）** —— **枚举安全，而不是枚举危险**。
 
-- `bash` 命令匹配危险模式：`rm -rf`、`sudo`、`chmod`/`chown 777`、`dd`、`mkfs`、`curl|wget ... | sh`、`git push --force`、写入 `/dev/`
-- `bash` 命令含重定向（`>`、`>>`、`tee`）且目标在 `repoRoot` 之外
-- `write` / `edit` 目标路径在 `repoRoot` 之外
-- 其余（`ls`、`cat`、`grep`、`git status`、`npm test` 等读类）直接放行
+放弃黑名单的理由：危险清单枚举不完。初版用正则匹配 `rm -rf`/`sudo`/`dd` 等模式，实测有 8 处零成本绕过 —— `echo hi>/etc/x`（少个空格）、`dd of=… if=…`（换参数序）、`chmod 0777`（加前导零）、`curl -o x.sh …; bash x.sh`（分号拆开）等等，且 `find / -delete`、`python3 -c "shutil.rmtree('/')"` 这类根本不含关键字。补正则补不完，与「宁可多问，别漏」直接冲突。
+
+`bash` 判定按顺序：
+
+1. 命令含任一 shell 元字符 —— `| & ; < > $ \` ( ) { }`、换行、反斜杠 —— 一律 **risky**。重定向、管道、命令替换、命令串联全部由这一条拦下。
+2. 首个 token 是 `find`：带 `-delete` / `-exec` / `-execdir` / `-ok` / `-okdir` / `-fls` / `-fprint` 时 risky，否则 safe。
+3. 首个 token 属于「需看子命令」表（`git` / `npm` / `pnpm` / `yarn` / `cargo` / `go` / `docker` / `kubectl`）：第二个 token 在该表的只读集合里才 safe，否则 risky。
+4. 首个 token 在只读命令白名单里 → safe。
+5. 其余一律 **risky**。
+
+`write` / `edit`：目标路径 `path.resolve` 后（并跟随符号链接）在 `repoRoot` 内 → safe，否则 risky。
+
+刻意不做引号解析：`grep "foo(bar)" .` 里被引号包住的括号也会判为 risky，多弹一次审批。误判方向是**偏安全**的，可接受。
 
 **`strict`** —— 所有 `bash` 调用 + 所有 `write` / `edit` 都要批。适合完全不信任的环境，代价是一个回合可能要批十几次。
 
-模式判定必须防绕过：命令先做空白归一化和大小写归一化再匹配，路径先 `path.resolve` 再判断是否在 `repoRoot` 内（不能只做字符串前缀比较，否则 `../` 和符号链接能逃逸）。
+判定必须防绕过：命令先做空白归一化和大小写归一化再匹配，路径先 `path.resolve` 再判断是否在 `repoRoot` 内（不能只做字符串前缀比较，否则 `../` 和符号链接能逃逸）。
 
 ## 会话替换
 
@@ -228,7 +237,7 @@ pi.on("tool_call", async (event, ctx) => {
 ### 1. 纯函数单测（主战场，无 SDK 无网络）
 
 - `renderer`：事件序列 → 期望 markdown。覆盖 delta 拼接、工具行、thinking 丢弃、收尾统计
-- `assessRisk`：表驱动，`balanced` / `strict` 两档各测一遍。重点测**绕过尝试** —— `rm  -rf`（多空格）、`RM -RF`（大小写）、`../` 路径逃逸、符号链接逃逸、`$(...)` 嵌套；以及 `balanced` 下读类命令确实放行（防误伤）
+- `assessRisk`：表驱动，`balanced` / `strict` 两档各测一遍。必须覆盖：元字符一票否决（管道 / 串联 / 命令替换 / 子 shell / 换行 / 无空格重定向）、白名单外命令一律要批、`find` 的 `-delete`/`-exec` 特例、多用途命令的子命令判定（`git status` 放行 vs `git push` 拦截）、`../` 与符号链接路径逃逸；以及白名单内读类命令确实放行（防误伤）。**黑名单时代确认过的 8 处绕过要作为回归用例常驻。**
 - `TurnStream`：push 早于 pump、finish 后残留 flush、pump 中持续 push、空回合
 - `config`：校验分支
 
