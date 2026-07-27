@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decideDelivery, parseControlCommand, shouldAccept } from "../extensions/feishu/bridge.ts";
+import {
+  Bridge,
+  decideDelivery,
+  parseControlCommand,
+  shouldAccept,
+} from "../extensions/feishu/bridge.ts";
+import type { GatewayLike } from "../extensions/feishu/bridge.ts";
 
 test("飞书侧控制命令被识别，不进 agent", () => {
   assert.deepEqual(parseControlCommand("/feishu status"), { kind: "status" });
@@ -56,4 +62,111 @@ test("未绑定时接受任意会话", () => {
 test("已绑定时只接受同一会话", () => {
   assert.equal(shouldAccept({ boundChatId: "oc_a" }, "oc_a"), true);
   assert.equal(shouldAccept({ boundChatId: "oc_a" }, "oc_b"), false);
+});
+
+/** 最小可用的假网关，够 Bridge 跑完一个回合 */
+function fakeGateway(overrides: Partial<GatewayLike> = {}): GatewayLike {
+  return {
+    bind() {},
+    onMessage() {},
+    async streamTurn(run) {
+      await run({ async append() {} });
+    },
+    async sendText() {},
+    async downloadImage() {
+      return undefined;
+    },
+    cardAsker: async () => ({ allow: false, reason: "未接线" }),
+    ...overrides,
+  };
+}
+
+const CONFIG = {
+  appId: "a",
+  appSecret: "b",
+  autoStart: false,
+  dmAllowlist: ["ou_1"],
+  groupAllowlist: [],
+  requireMention: true,
+  approvalMode: "balanced" as const,
+  approvalTimeoutMs: 1000,
+  repoRoot: "/work/repo",
+};
+
+test("流式收尾卡住时 endTurn 不会永久挂起，改为补发全文", async () => {
+  const sent: string[] = [];
+  const gateway = fakeGateway({
+    // 挂住不返回 —— 既不 resolve 也不 reject
+    streamTurn: () => new Promise<void>(() => {}),
+    async sendText(markdown) {
+      sent.push(markdown);
+    },
+  });
+  const bridge = new Bridge(CONFIG, gateway, () => {}, () => 0, 20);
+
+  bridge.startTurn();
+  bridge.onTextDelta("半截内容");
+  await bridge.endTurn();
+
+  assert.equal(sent.length, 1, "应补发一次全文");
+  assert.ok(sent[0].includes("半截内容"));
+});
+
+test("流式正常时不补发", async () => {
+  const sent: string[] = [];
+  const bridge = new Bridge(
+    CONFIG,
+    fakeGateway({
+      async sendText(markdown) {
+        sent.push(markdown);
+      },
+    }),
+    () => {},
+    () => 0,
+    1000,
+  );
+  bridge.startTurn();
+  bridge.onTextDelta("内容");
+  await bridge.endTurn();
+  assert.deepEqual(sent, [], "流式成功就不该再发一遍");
+});
+
+test("isStreaming 跟随回合起止", async () => {
+  const bridge = new Bridge(CONFIG, fakeGateway(), () => {}, () => 0, 1000);
+  assert.equal(bridge.isStreaming, false);
+  bridge.startTurn();
+  assert.equal(bridge.isStreaming, true);
+  await bridge.endTurn();
+  assert.equal(bridge.isStreaming, false);
+});
+
+test("没有开过回合时 endTurn 是安全的空操作", async () => {
+  const bridge = new Bridge(CONFIG, fakeGateway(), () => {}, () => 0, 1000);
+  await bridge.endTurn();
+  await bridge.endTurn();
+});
+
+test("gateToolCall：安全命令直接放行，危险命令被拒后返回 block", async () => {
+  const bridge = new Bridge(CONFIG, fakeGateway(), () => {}, () => 0, 1000);
+  assert.equal(await bridge.gateToolCall("bash", { command: "ls -la" }, undefined), undefined);
+
+  const blocked = await bridge.gateToolCall("bash", { command: "rm -rf /" }, undefined);
+  assert.deepEqual(blocked, { block: true, reason: "未接线" });
+});
+
+test("gateToolCall：审批通道全挂时 fail-closed", async () => {
+  const bridge = new Bridge(
+    CONFIG,
+    fakeGateway({
+      cardAsker: async () => {
+        throw new Error("飞书未连接");
+      },
+    }),
+    () => {},
+    () => 0,
+    1000,
+  );
+  const blocked = await bridge.gateToolCall("bash", { command: "rm -rf /" }, undefined);
+  assert.equal(blocked?.block, true);
+  assert.ok(blocked?.reason.includes("审批通道不可用"));
 });

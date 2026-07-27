@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import type { AppendSink } from "./turn-stream.ts";
 import { TurnStream } from "./turn-stream.ts";
-import { assessRisk, type PathResolver } from "./risk.ts";
+import { assessRisk, type PathResolver, type Risk } from "./risk.ts";
 import { requestApproval, type Asker, type Decision } from "./approval.ts";
 import {
   renderBlocked,
@@ -23,6 +23,12 @@ export interface GatewayLike {
   downloadImage(fileKey: string): Promise<Buffer | undefined>;
   cardAsker: Asker;
 }
+
+/**
+ * 回合结束后等待流式收尾的上限。飞书 SDK 若卡在一次 send 上不返回
+ * （挂住而不是拒绝），无上限的 await 会让 endTurn 永不返回。
+ */
+const STREAM_DRAIN_TIMEOUT_MS = 15_000;
 
 export type ControlCommand = { kind: "status" } | { kind: "stop" } | { kind: "help" };
 
@@ -90,17 +96,20 @@ export class Bridge {
   readonly #gateway: GatewayLike;
   readonly #log: (msg: string) => void;
   readonly #now: () => number;
+  readonly #drainTimeoutMs: number;
 
   constructor(
     config: Config,
     gateway: GatewayLike,
     log: (msg: string) => void,
     now: () => number = () => Date.now(),
+    drainTimeoutMs: number = STREAM_DRAIN_TIMEOUT_MS,
   ) {
     this.#config = config;
     this.#gateway = gateway;
     this.#log = log;
     this.#now = now;
+    this.#drainTimeoutMs = drainTimeoutMs;
   }
 
   /** 出站一律不得把异常抛回 pi 的事件循环 */
@@ -176,9 +185,23 @@ export class Bridge {
     this.#turn = undefined;
     this.#toolStartedAt.clear();
     turn.stream.finish();
-    await turn.pumping;
 
-    // 流式卡片废了（断线/限流/元素超限）时，把全文作为普通消息补发一次
+    // 给 pump 收尾设上限。飞书 SDK 若卡在一次 send 上不返回（不是拒绝，是挂住），
+    // 无上限的 await 会让 endTurn 永不返回，调用方跟着一起卡死。
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const drained = await Promise.race([
+      turn.pumping.then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), this.#drainTimeoutMs);
+      }),
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+    if (!drained) {
+      turn.streamFailed = true;
+      this.#log(`流式收尾超时（${this.#drainTimeoutMs}ms），改为补发全文`);
+    }
+
+    // 流式卡片废了（断线/限流/元素超限/收尾超时）时，把全文作为普通消息补发一次
     if (turn.streamFailed && turn.transcript.trim() !== "") {
       try {
         await this.#gateway.sendText(turn.transcript);
@@ -194,13 +217,22 @@ export class Bridge {
     input: Record<string, unknown>,
     tuiAsker: Asker | undefined,
   ): Promise<{ block: true; reason: string } | undefined> {
-    const risk = assessRisk({
-      toolName,
-      input,
-      mode: this.#config.approvalMode,
-      repoRoot: this.#config.repoRoot,
-      resolvePath: realPathOrSelf,
-    });
+    // 判定本身抛错必须按危险处理。这是个 async 函数，未捕获的异常会变成
+    // rejected promise 直接跳过 block 契约 —— 结果是危险工具被放行，
+    // 在安全闸门上正好是最坏的方向。
+    let risk: Risk;
+    try {
+      risk = assessRisk({
+        toolName,
+        input,
+        mode: this.#config.approvalMode,
+        repoRoot: this.#config.repoRoot,
+        resolvePath: realPathOrSelf,
+      });
+    } catch (err) {
+      this.#log(`危险判定异常，按危险处理：${String(err)}`);
+      risk = "risky";
+    }
     if (risk === "safe") return undefined;
 
     const askers: Asker[] = [this.#gateway.cardAsker];
