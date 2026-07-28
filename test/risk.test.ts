@@ -6,6 +6,7 @@ import path from "node:path";
 import { realPathOrSelf } from "../extensions/feishu/bridge.ts";
 import {
   assessBashRisk,
+  assessRelaxedBashRisk,
   assessRisk,
   flagsAllowed,
   isInside,
@@ -455,4 +456,55 @@ test("relaxed：写真正的设备和系统目录仍然要批", () => {
   assert.equal(relaxed("echo x > /etc/cron.d/pwn"), "risky");
   assert.equal(relaxed("echo x > /usr/bin/ls"), "risky");
   assert.equal(relaxed("echo x > /root/.ssh/authorized_keys"), "risky");
+});
+
+test("relaxed：服务/防火墙类工具的只读子命令放行", () => {
+  assert.equal(relaxed("systemctl show-environment"), "safe");
+  assert.equal(relaxed("systemctl status nginx"), "safe");
+  assert.equal(relaxed("systemctl list-units --type=service"), "safe");
+  assert.equal(relaxed("systemctl is-active nginx"), "safe");
+  assert.equal(relaxed("service nginx status"), "safe");
+  assert.equal(relaxed("iptables -L"), "safe");
+  assert.equal(relaxed("crontab -l"), "safe");
+  assert.equal(relaxed("nft list ruleset"), "safe");
+  // 实际踩到的那条命令
+  assert.equal(
+    relaxed('grep -h "VIKUNJA" /root/.bashrc /etc/environment 2>/dev/null; systemctl show-environment 2>/dev/null | grep VIKUNJA'),
+    "safe",
+  );
+});
+
+test("relaxed：改服务状态、改防火墙、装 crontab 仍然要批", () => {
+  assert.equal(relaxed("systemctl restart nginx"), "risky");
+  assert.equal(relaxed("systemctl -q stop nginx"), "risky", "标志夹在中间也要拦");
+  assert.equal(relaxed("systemctl disable nginx"), "risky");
+  assert.equal(relaxed("systemctl daemon-reload"), "risky");
+  assert.equal(relaxed("service nginx restart"), "risky");
+  assert.equal(relaxed("iptables -A INPUT -j DROP"), "risky");
+  assert.equal(relaxed("crontab -e"), "risky");
+  assert.equal(relaxed("crontab evil.cron"), "risky", "裸 crontab 会从参数装任务");
+  assert.equal(relaxed("nft add rule inet filter input drop"), "risky");
+});
+
+test("relaxed：denyPatterns 追加到内置默认之上", () => {
+  const extra = { deny: ["\\bterraform\\s+apply\\b"] };
+  assert.equal(assessRelaxedBashRisk("terraform apply -auto-approve", extra), "risky");
+  assert.equal(assessRelaxedBashRisk("terraform plan", extra), "safe");
+  assert.equal(assessRelaxedBashRisk("rm -rf /", extra), "risky", "内置规则仍然生效");
+});
+
+test("relaxed：allowPatterns 是例外，优先于所有 deny", () => {
+  assert.equal(assessRelaxedBashRisk("kill -9 123"), "risky", "默认拦");
+  assert.equal(assessRelaxedBashRisk("kill -9 123", { allow: ["\\bkill\\b"] }), "safe");
+});
+
+test("relaxed：allow 也压得住自定义的 deny", () => {
+  const both = { deny: ["\\bfoo\\b"], allow: ["\\bfoo\\s+--dry-run\\b"] };
+  assert.equal(assessRelaxedBashRisk("foo --apply", both), "risky");
+  assert.equal(assessRelaxedBashRisk("foo --dry-run", both), "safe");
+});
+
+test("relaxed：不传自定义模式时行为与之前完全一致", () => {
+  assert.equal(assessRelaxedBashRisk("npm run build"), "safe");
+  assert.equal(assessRelaxedBashRisk("sudo x"), "risky");
 });

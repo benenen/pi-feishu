@@ -29,6 +29,10 @@ export interface Config {
   bindTarget: string;
   requireMention: boolean;
   approvalMode: ApprovalMode;
+  /** relaxed 档追加的危险模式（正则源串），加载时已校验可编译 */
+  denyPatterns: string[];
+  /** relaxed 档的例外，命中即放行，优先于所有 deny */
+  allowPatterns: string[];
   approvalTimeoutMs: number;
   repoRoot: string;
 }
@@ -193,6 +197,24 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
     }
   }
 
+  // 正则在这里就编译一遍：让「配置写错了」在启动时报出来，
+  // 而不是等某条命令恰好走到判定时才炸 —— 那时 fail-closed 会把一切判危险，
+  // 现象是「突然什么都要审批」，根因极难定位
+  const readPatterns = (v: unknown, key: string): string[] => {
+    const arr = readStringArray(v, key, problems);
+    if (arr === undefined) return [];
+    for (const src of arr) {
+      try {
+        new RegExp(src);
+      } catch (err) {
+        problems.push(`${key} 里的 ${JSON.stringify(src)} 不是合法正则：${String(err)}`);
+      }
+    }
+    return arr;
+  };
+  const denyPatterns = readPatterns(merged.denyPatterns, "denyPatterns");
+  const allowPatterns = readPatterns(merged.allowPatterns, "allowPatterns");
+
   let approvalTimeoutMs = 120_000;
   if (merged.approvalTimeoutMs !== undefined) {
     const n = merged.approvalTimeoutMs;
@@ -216,6 +238,8 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
     bindTarget,
     requireMention,
     approvalMode,
+    denyPatterns,
+    allowPatterns,
     approvalTimeoutMs,
     repoRoot,
   };

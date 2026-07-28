@@ -331,6 +331,8 @@ export class Bridge {
         mode: this.#config.approvalMode,
         repoRoot: this.#config.repoRoot,
         resolvePath: realPathOrSelf,
+        denyPatterns: this.#config.denyPatterns,
+        allowPatterns: this.#config.allowPatterns,
       });
     } catch (err) {
       this.#log(`危险判定异常，按危险处理：${String(err)}`, "error");

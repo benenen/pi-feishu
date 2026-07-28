@@ -303,7 +303,16 @@ const RELAXED_DANGEROUS: readonly RegExp[] = [
   /\b(chmod|chown|chgrp|useradd|userdel|usermod|passwd|visudo)\b/,
   /\b(sudo|su|doas)\b/,
   /\b(shutdown|reboot|halt|poweroff|init)\b/,
-  /\b(systemctl|service|iptables|nft|crontab)\b/,
+  // 这几个都有纯只读的子命令（systemctl show-environment / status、
+  // service X status、iptables -L、crontab -l、nft list）。整词一刀切会把
+  // 排查类命令全部误判成危险，所以只拦「会改状态」的用法：
+  // 用否定先行断言列出只读子命令，其余一律拦 —— 标志夹在中间
+  // （systemctl -q stop x）也会因为不匹配只读表而被拦下。
+  /\bsystemctl\s+(?!(show-environment|show|status|cat|list-\S*|is-\S*|get-default)\b)/,
+  /\bservice\s+\S+\s+(?!status\b)\S/,
+  /\biptables\b(?!\s+(-L|-S|--list|--list-rules)\b)/,
+  /\bcrontab\b(?!\s+(-l|--list)\b)/,
+  /\bnft\b(?!\s+list\b)/,
   /\b(kill|killall|pkill)\b/,
   // 下载后直接执行
   /\b(curl|wget)\b[^|]*\|/,
@@ -320,8 +329,35 @@ const RELAXED_DANGEROUS: readonly RegExp[] = [
   /\bsystem\s+prune\b/,
 ];
 
-export function assessRelaxedBashRisk(command: string): Risk {
-  return RELAXED_DANGEROUS.some((re) => re.test(command)) ? "risky" : "safe";
+export interface RelaxedPatterns {
+  /** 追加到内置默认之上的危险模式（正则源串） */
+  deny?: readonly string[];
+  /** 例外：命中即放行，优先于所有 deny —— 用来给内置规则开口子 */
+  allow?: readonly string[];
+}
+
+/**
+ * 编译用户配置里的正则。配置加载时已经校验过可编译，这里再包一层是因为
+ * 本函数也被直接调用（测试、其他调用方）—— 编译失败宁可当作「这条规则不存在」
+ * 也不能抛异常：assessRisk 抛错会走到 gateToolCall 的 catch，把整批调用判危险。
+ */
+function compile(sources: readonly string[] | undefined): RegExp[] {
+  const out: RegExp[] = [];
+  for (const src of sources ?? []) {
+    try {
+      out.push(new RegExp(src));
+    } catch {
+      // 忽略：配置校验已经拦过，走到这里说明是直接调用方传了坏值
+    }
+  }
+  return out;
+}
+
+export function assessRelaxedBashRisk(command: string, extra?: RelaxedPatterns): Risk {
+  // allow 先判且优先级最高：它存在的意义就是给内置规则开口子
+  if (compile(extra?.allow).some((re) => re.test(command))) return "safe";
+  const deny = [...RELAXED_DANGEROUS, ...compile(extra?.deny)];
+  return deny.some((re) => re.test(command)) ? "risky" : "safe";
 }
 
 export interface AssessArgs {
@@ -330,6 +366,9 @@ export interface AssessArgs {
   mode: ApprovalMode;
   repoRoot: string;
   resolvePath?: PathResolver;
+  /** relaxed 档的自定义黑名单（追加）与例外（优先放行） */
+  denyPatterns?: readonly string[];
+  allowPatterns?: readonly string[];
 }
 
 export function assessRisk({
@@ -338,6 +377,8 @@ export function assessRisk({
   mode,
   repoRoot,
   resolvePath = identity,
+  denyPatterns,
+  allowPatterns,
 }: AssessArgs): Risk {
   if (mode === "strict") {
     // 安全清单而非危险清单：扩展和 MCP 服务器能注册任意名字的工具，
@@ -355,7 +396,9 @@ export function assessRisk({
   if (toolName === "bash") {
     const command = typeof input.command === "string" ? input.command : undefined;
     if (command === undefined) return "risky";
-    return mode === "relaxed" ? assessRelaxedBashRisk(command) : assessBashRisk(command);
+    return mode === "relaxed"
+      ? assessRelaxedBashRisk(command, { deny: denyPatterns, allow: allowPatterns })
+      : assessBashRisk(command);
   }
 
   return "safe";

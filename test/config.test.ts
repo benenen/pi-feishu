@@ -267,3 +267,41 @@ test("bindTarget 拒绝既不是关键字也不像 chat_id 的值", () => {
   );
   assert.ok(e.problems.some((p) => p.includes("bindTarget")), "open_id 不是会话 id，要拦");
 });
+
+test("denyPatterns / allowPatterns 默认为空数组", () => {
+  const c = loadConfig({ files: [base], env: {}, cwd: "/w" });
+  assert.deepEqual(c.denyPatterns, []);
+  assert.deepEqual(c.allowPatterns, []);
+});
+
+test("denyPatterns / allowPatterns 读入后原样保留", () => {
+  const c = loadConfig({
+    files: [{ ...base, denyPatterns: ["\\bterraform\\s+apply\\b"], allowPatterns: ["\\bkill\\b"] }],
+    env: {},
+    cwd: "/w",
+  });
+  assert.deepEqual(c.denyPatterns, ["\\bterraform\\s+apply\\b"]);
+  assert.deepEqual(c.allowPatterns, ["\\bkill\\b"]);
+});
+
+test("非法正则在加载配置时就报错，而不是等到判定时炸", () => {
+  const e = throwsConfigError(() =>
+    loadConfig({ files: [{ ...base, denyPatterns: ["(unclosed"] }], env: {}, cwd: "/w" }),
+  );
+  assert.ok(e.problems.some((p) => p.includes("denyPatterns")));
+  assert.ok(e.problems.some((p) => p.includes("(unclosed")), "要指出是哪一条坏了");
+});
+
+test("allowPatterns 里的非法正则同样被拦下", () => {
+  const e = throwsConfigError(() =>
+    loadConfig({ files: [{ ...base, allowPatterns: ["a[b"] }], env: {}, cwd: "/w" }),
+  );
+  assert.ok(e.problems.some((p) => p.includes("allowPatterns")));
+});
+
+test("denyPatterns 必须是字符串数组", () => {
+  const e = throwsConfigError(() =>
+    loadConfig({ files: [{ ...base, denyPatterns: "rm" }], env: {}, cwd: "/w" }),
+  );
+  assert.ok(e.problems.some((p) => p.includes("denyPatterns")));
+});

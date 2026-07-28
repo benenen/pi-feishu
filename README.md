@@ -39,6 +39,8 @@ pi install git:github.com/you/pi-feishu
 | `approvalMode` | `"balanced"` | `relaxed` 只拦黑名单里的破坏性命令；`balanced` 只放行只读命令白名单；`strict` 所有 bash/write/edit 都要批。详见下方「审批档位」 |
 | `operatorOpenId` | `approverAllowlist[0]` | `/feishu start` 后主动私信谁并绑定该私聊。填 `ou_` 开头的 open_id |
 | `bindTarget` | `"operator"` | 启动时绑谁：`operator` 私信操作员并绑定该私聊；`none` 不主动绑、等首条消息（群里 @ 用这个）；`oc_xxx` 直接绑定该群 |
+| `denyPatterns` | `[]` | **仅 relaxed 档**：追加到内置黑名单之上的正则（字符串形式）|
+| `allowPatterns` | `[]` | **仅 relaxed 档**：例外，命中即放行，优先于所有 deny（含内置）|
 | `approvalTimeoutMs` | `120000` | 审批超时，超时即拒绝 |
 | `repoRoot` | 当前 cwd | 判定「写到范围外」的基准 |
 
@@ -61,6 +63,25 @@ pi install git:github.com/you/pi-feishu
 
 `relaxed` 是**黑名单**模型，与另两档相反 —— 枚举危险必然有漏网，这正是它用便利换来的代价。
 它仍然保留 write/edit 的仓库边界检查。
+
+内置黑名单难免误伤（`2>/dev/null` 曾被当成写系统目录、`systemctl show-environment`
+曾被当成改服务），所以它是可调的：
+
+```json
+{
+  "approvalMode": "relaxed",
+  "denyPatterns": ["\\bterraform\\s+apply\\b"],
+  "allowPatterns": ["\\bkill\\b"]
+}
+```
+
+- `denyPatterns` **追加**到内置之上，用来加自己的禁忌
+- `allowPatterns` 是**例外**，命中即放行，**优先于所有 deny（包括内置）** —— 用来给内置规则开口子
+- 两者都是正则的字符串形式，JSON 里反斜杠要写两遍
+- 非法正则在 `/feishu start` 时就报错，不会拖到某条命令走到判定时才炸
+
+写得太宽的 `allowPatterns`（比如 `".*"`）会让整道闸门失效，这是你自己的取舍。
+`/feishu status` 会显示当前加载了几条自定义规则，可以拿它确认配置生效了。
 
 审批卡片上有三个按钮：**允许** / **本回合全部允许** / **拒绝**。
 中间那个只在当前 agent 回合内有效，回合一结束立即失效，不跨回合、不跨会话。

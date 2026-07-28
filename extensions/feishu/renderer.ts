@@ -126,6 +126,12 @@ export function renderStatus(info: StatusInfo): string {
     c.groupAllowlist.length === 0 ? "不限" : `${c.groupAllowlist.length} 个`
   }`;
 
+  // 配了自定义规则却看不到，就没法确认配置到底生效没有；没配则不提，免得添噪音
+  const custom =
+    c.denyPatterns.length + c.allowPatterns.length > 0
+      ? ` · 自定义规则 deny ${c.denyPatterns.length} / allow ${c.allowPatterns.length}`
+      : "";
+
   const turn = info.streaming ? "回合进行中" : "空闲";
   const exempt = info.turnApproved ? " · 已点「本回合全部允许」" : "";
 
@@ -136,7 +142,7 @@ export function renderStatus(info: StatusInfo): string {
     `· 当前：${turn}${exempt}`,
     `· 私聊：${dm}`,
     `· 群聊：${group}`,
-    `· 审批：${c.approvalMode} · 超时 ${formatDuration(c.approvalTimeoutMs)} · 审批人 ${c.approverAllowlist.length} 人`,
+    `· 审批：${c.approvalMode} · 超时 ${formatDuration(c.approvalTimeoutMs)} · 审批人 ${c.approverAllowlist.length} 人${custom}`,
     `· 仓库根：${c.repoRoot}`,
   ].join("\n");
 }

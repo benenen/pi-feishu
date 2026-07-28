@@ -108,6 +108,8 @@ const CFG: Config = {
   bindTarget: "operator",
   requireMention: true,
   approvalMode: "balanced",
+  denyPatterns: [],
+  allowPatterns: [],
   approvalTimeoutMs: 120_000,
   repoRoot: "/work/repo",
 };
@@ -199,4 +201,20 @@ test("status：查不到名称时只显示 id，不显示空括号", () => {
   const out = renderStatus({ running: true, config: CFG, boundChatId: "oc_bound" });
   assert.match(out, /oc_bound/);
   assert.equal(/·\s+·/.test(out), false, "不该留下空占位");
+});
+
+test("status：配了自定义规则要显示条数，否则你无从确认它生效没有", () => {
+  const out = renderStatus({
+    running: true,
+    config: { ...CFG, approvalMode: "relaxed", denyPatterns: ["\\bfoo\\b"], allowPatterns: ["\\bkill\\b", "\\bbar\\b"] },
+    boundChatId: "oc_x",
+  });
+  assert.match(out, /自定义规则/);
+  assert.match(out, /deny 1/);
+  assert.match(out, /allow 2/);
+});
+
+test("status：没配自定义规则就不提，别加无谓的噪音", () => {
+  const out = renderStatus({ running: true, config: CFG, boundChatId: "oc_x" });
+  assert.equal(out.includes("自定义规则"), false);
 });

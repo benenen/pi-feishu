@@ -95,6 +95,8 @@ const CONFIG = {
   bindTarget: "operator",
   requireMention: true,
   approvalMode: "balanced" as const,
+  denyPatterns: [],
+  allowPatterns: [],
   approvalTimeoutMs: 1000,
   repoRoot: "/work/repo",
 };
