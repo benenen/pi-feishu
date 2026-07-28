@@ -32,7 +32,11 @@ export interface GatewayLike {
  */
 const STREAM_DRAIN_TIMEOUT_MS = 15_000;
 
-export type ControlCommand = { kind: "status" } | { kind: "stop" } | { kind: "help" };
+export type ControlCommand =
+  | { kind: "status" }
+  | { kind: "stop" }
+  | { kind: "unbind" }
+  | { kind: "help" };
 
 /**
  * 飞书侧的控制命令，在本地处理、不进 agent。
@@ -47,6 +51,7 @@ export function parseControlCommand(text: string): ControlCommand | undefined {
   const sub = rest.trim().toLowerCase();
   if (sub === "status") return { kind: "status" };
   if (sub === "stop") return { kind: "stop" };
+  if (sub === "unbind") return { kind: "unbind" };
   return { kind: "help" };
 }
 
@@ -63,6 +68,75 @@ export function decideDelivery(
 
 export function shouldAccept(gateway: { boundChatId?: string }, chatId: string): boolean {
   return gateway.boundChatId === undefined || gateway.boundChatId === chatId;
+}
+
+/** bindToChat 需要的那一小块网关能力 */
+export interface ChatBindGateway {
+  boundChatId?: string;
+  bind(chatId: string): void;
+  sendText(text: string, to?: string): Promise<void>;
+}
+
+/**
+ * 直接绑定一个已知的会话（通常是群），并往里发一条就绪通知。
+ *
+ * 通知发失败仍然完成绑定：绑定决定的是**入站消息认哪个会话**，
+ * 出站坏了（机器人不在群里、被移除权限）不该连入站过滤一起失效 ——
+ * 否则群里发的消息会被当成「未绑定」而绑到别处去。
+ */
+export async function bindToChat(
+  gateway: ChatBindGateway,
+  chatId: string,
+  text: string,
+  log: LogFn,
+): Promise<boolean> {
+  if (gateway.boundChatId !== undefined) return false;
+  gateway.bind(chatId);
+  try {
+    await gateway.sendText(text, chatId);
+  } catch (err) {
+    log(`向 ${chatId} 发送就绪通知失败（绑定已生效）：${String(err)}`, "warning");
+  }
+  return true;
+}
+
+/** announceAndBind 需要的那一小块网关能力 */
+export interface AnnounceGateway {
+  boundChatId?: string;
+  bind(chatId: string): void;
+  /** 私信某人，返回该私聊会话的 chatId；拿不到时返回 undefined */
+  announce(openId: string, text: string): Promise<string | undefined>;
+}
+
+/**
+ * 主动私信操作员并把回来的私聊会话绑上，省去「必须先由人发一条消息」这一步。
+ *
+ * 全程不抛异常：机器人对该用户没有可用性、用户还没添加机器人、网络不通，
+ * 都只是「这次没绑上」而已 —— 绝不能让 /feishu start 跟着失败。绑不上就退回
+ * 原来的行为：等第一条入站消息来绑定。
+ */
+export async function announceAndBind(
+  gateway: AnnounceGateway,
+  operatorOpenId: string,
+  text: string,
+  log: LogFn,
+): Promise<boolean> {
+  // 已经绑好了就别再发消息打扰，更不能把已有绑定顶掉
+  if (gateway.boundChatId !== undefined) return false;
+
+  let chatId: string | undefined;
+  try {
+    chatId = await gateway.announce(operatorOpenId, text);
+  } catch (err) {
+    log(`主动私信操作员失败，退回等待入站消息绑定：${String(err)}`, "warning");
+    return false;
+  }
+  if (chatId === undefined) {
+    log("主动私信没拿到 chatId，退回等待入站消息绑定", "warning");
+    return false;
+  }
+  gateway.bind(chatId);
+  return true;
 }
 
 /**
@@ -111,6 +185,11 @@ export class Bridge {
   /** ExtensionAPI 不暴露流式状态，这里自己跟踪 */
   get isStreaming(): boolean {
     return this.#turn !== undefined;
+  }
+
+  /** 操作员是否点过「本回合全部允许」，供 /feishu status 展示 */
+  get turnApproved(): boolean {
+    return this.#turnApproved;
   }
 
   // strip-only 模式不支持构造函数参数属性，依赖写成显式字段

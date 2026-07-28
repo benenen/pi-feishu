@@ -1,3 +1,4 @@
+import type { Config } from "./config.ts";
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const total = Math.round(ms / 1000);
@@ -72,4 +73,70 @@ export function renderBlocked(toolName: string, reason: string): string {
 
 export function renderNotice(text: string): string {
   return `\nℹ️ ${plain(text, 200)}\n`;
+}
+
+/**
+ * 会话的人类可读名称。私聊在飞书那边没有名字（chat.get 的 name 返回 null），
+ * 所以必须按类型退回一个说法，否则状态里会出现一段空白。
+ */
+export function chatLabel(info: { name?: string; chatType?: "p2p" | "group" }): string {
+  if (info.name) return info.name;
+  return info.chatType === "p2p" ? "私聊" : "群聊";
+}
+
+export interface StatusInfo {
+  running: boolean;
+  config?: Config;
+  boundChatId?: string;
+  /** 绑定会话的名称，查不到时省略 —— 不能因为查不到就不显示 id */
+  boundChatName?: string;
+  streaming?: boolean;
+  /** 操作员是否点过「本回合全部允许」 */
+  turnApproved?: boolean;
+}
+
+/**
+ * /feishu status 的正文。终端和飞书两侧共用同一份渲染，避免两边说法不一致。
+ * 刻意不含 appSecret —— 这段文字会原样发进飞书聊天记录。
+ */
+export function renderStatus(info: StatusInfo): string {
+  if (!info.running || !info.config) {
+    return "飞书桥接：未运行。在终端用 `/feishu start` 启动。";
+  }
+  const c = info.config;
+
+  const bindWay =
+    c.bindTarget === "operator"
+      ? "启动时私信操作员绑定"
+      : c.bindTarget === "none"
+        ? "等首条消息绑定"
+        : `启动时直接绑定 ${c.bindTarget}`;
+  const named =
+    info.boundChatName !== undefined && info.boundChatName !== ""
+      ? `${info.boundChatName} · ${info.boundChatId}`
+      : `${info.boundChatId}`;
+  const bound =
+    info.boundChatId !== undefined
+      ? `${named}（${bindWay}）`
+      : `尚未绑定，下一条通过策略的消息会绑定它（${bindWay}）`;
+
+  const dm =
+    c.dmMode === "open" ? "所有人可私聊" : `仅白名单 ${c.dmAllowlist.length} 人`;
+  const group = `${c.requireMention ? "需要 @ 机器人" : "**不需要 @**（群里每条消息都会进来）"} · 群白名单：${
+    c.groupAllowlist.length === 0 ? "不限" : `${c.groupAllowlist.length} 个`
+  }`;
+
+  const turn = info.streaming ? "回合进行中" : "空闲";
+  const exempt = info.turnApproved ? " · 已点「本回合全部允许」" : "";
+
+  return [
+    "飞书桥接：运行中",
+    `· 应用：${c.appId}`,
+    `· 绑定会话：${bound}`,
+    `· 当前：${turn}${exempt}`,
+    `· 私聊：${dm}`,
+    `· 群聊：${group}`,
+    `· 审批：${c.approvalMode} · 超时 ${formatDuration(c.approvalTimeoutMs)} · 审批人 ${c.approverAllowlist.length} 人`,
+    `· 仓库根：${c.repoRoot}`,
+  ].join("\n");
 }

@@ -35,8 +35,10 @@ pi install git:github.com/you/pi-feishu
 | `dmAllowlist` | `[]` | 允许单聊的 open_id。**open_id 按应用隔离** —— 换了 appId 就得重新取 |
 | `groupAllowlist` | `[]` | 允许的群 chat_id |
 | `approverAllowlist` | 同 `dmAllowlist` | **谁的卡片点击算数**。飞书 SDK 不对卡片回调做白名单过滤，只配 `groupAllowlist` 时必须显式指定，否则群里任何人都能点「允许」 |
-| `requireMention` | `true` | 群聊是否需要 @ 机器人 |
+| `requireMention` | `true` | 群聊是否需要 @ 机器人。**群里拉了多个 bot 时必须保持 `true`** —— 设成 `false` 等于不看 @，每条群消息会同时喂给群里所有 bot，多个 agent 一起干活、一起刷屏。只对群生效，私聊不受影响 |
 | `approvalMode` | `"balanced"` | `relaxed` 只拦黑名单里的破坏性命令；`balanced` 只放行只读命令白名单；`strict` 所有 bash/write/edit 都要批。详见下方「审批档位」 |
+| `operatorOpenId` | `approverAllowlist[0]` | `/feishu start` 后主动私信谁并绑定该私聊。填 `ou_` 开头的 open_id |
+| `bindTarget` | `"operator"` | 启动时绑谁：`operator` 私信操作员并绑定该私聊；`none` 不主动绑、等首条消息（群里 @ 用这个）；`oc_xxx` 直接绑定该群 |
 | `approvalTimeoutMs` | `120000` | 审批超时，超时即拒绝 |
 | `repoRoot` | 当前 cwd | 判定「写到范围外」的基准 |
 
@@ -64,6 +66,41 @@ pi install git:github.com/you/pi-feishu
 中间那个只在当前 agent 回合内有效，回合一结束立即失效，不跨回合、不跨会话。
 密集操作时点它，省得一条条批。
 
+## 一个 pi 会话配一个 bot
+
+`/feishu start` 成功后按 `bindTarget` 决定绑谁：默认 `operator`，即**主动私信 `operatorOpenId`
+并当场绑定那个私聊**，不用你先发消息。绑不上（机器人对你没有可用性、你还没添加它）不会让
+start 失败，只是退回等第一条入站消息来绑定。
+
+**要在群里用就别让它绑私聊** —— 一个会话同时只认一个 chatId，绑了私聊之后群里 @ 它只会收到
+「该 pi 会话已绑定到其他对话」。群场景把 `bindTarget` 设成群的 `oc_xxx`（启动即绑该群），
+或设成 `none` 等你在群里 @ 它时再绑。绑错了用 `/feishu unbind` 解开，不用重启会话。
+
+群里拉多个 bot 时，`mentionedBot` 是拿 mention 的 open_id 跟**该 bot 自己的** open_id 比对的，
+所以 @ 哪个 bot 就只有哪个 bot 的 pi 会话响应，不会串台 —— 前提是 `requireMention` 为 `true`。
+
+多个 pi 会话要同时用，**每个会话必须用不同的飞书应用** —— 同一个 appId 开两条长连接，
+飞书只把事件推给其中一条，推给哪条不确定，消息会随机丢给某个会话。
+
+按项目分配即可，配置是 `~/.pi/agent/feishu.json` → `<项目>/.pi/feishu.json` 顺序合并、后者覆盖前者：
+
+```
+~/.pi/agent/feishu.json      公共部分：approvalMode、requireMention…
+project-a/.pi/feishu.json    { "appId": "cli_A", "appSecret": "…", "approverAllowlist": ["ou_A"] }
+project-b/.pi/feishu.json    { "appId": "cli_B", "appSecret": "…", "approverAllowlist": ["ou_B"] }
+```
+
+**open_id 按应用隔离** —— 同一个人在每个应用下的 open_id 都不同，`approverAllowlist`
+必须各填各的。取当前应用下自己的 open_id：
+
+```bash
+TOKEN=$(curl -s -X POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal \
+  -H 'Content-Type: application/json' \
+  -d '{"app_id":"cli_xxx","app_secret":"yyy"}' | jq -r .tenant_access_token)
+curl -s -H "Authorization: Bearer $TOKEN" \
+  'https://open.feishu.cn/open-apis/contact/v3/scopes?user_id_type=open_id' | jq .data.user_ids
+```
+
 ## 飞书应用配置
 
 1. 开放平台创建企业自建应用，开启「机器人」能力
@@ -76,11 +113,12 @@ pi install git:github.com/you/pi-feishu
 
 ```
 /feishu start     启动桥接
-/feishu status    查看连接与绑定状态
+/feishu status    查看连接、绑定、策略、审批的完整状态
+/feishu unbind    解绑当前会话，下一条消息重新绑定
 /feishu stop      停止并解绑
 ```
 
-飞书里只有 `/feishu status` 和 `/feishu stop` —— **`start` 只能从终端发起**，建立长连接是拿着终端的人的决定。
+飞书里有 `/feishu status`、`/feishu unbind`、`/feishu stop` —— **`start` 只能从终端发起**，建立长连接是拿着终端的人的决定。
 
 首条通过白名单的消息会**绑定**该会话，之后其他对话的消息一律回绝（回执发到发起方那个会话，不是已绑定的那个）。
 

@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import type { Config } from "../extensions/feishu/config.ts";
 import assert from "node:assert/strict";
 import {
   formatDuration,
@@ -9,6 +10,8 @@ import {
   renderToolStart,
   renderTurnEnd,
   renderUserPrompt,
+  chatLabel,
+  renderStatus,
 } from "../extensions/feishu/renderer.ts";
 
 test("formatDuration 分档", () => {
@@ -89,4 +92,111 @@ test("renderNotice 同样中和", () => {
   const out = renderNotice("提示\n第二行 **粗**");
   assert.equal(out.split("\n").length - 1, 2);
   assert.ok(!out.includes("**"));
+});
+
+// ── /feishu status 的详细渲染 ───────────────────────────────────────
+
+const CFG: Config = {
+  appId: "cli_abc",
+  appSecret: "SUPER_SECRET_VALUE",
+  autoStart: true,
+  dmMode: "open",
+  dmAllowlist: [],
+  groupAllowlist: ["oc_g1"],
+  approverAllowlist: ["ou_a", "ou_b"],
+  operatorOpenId: "ou_a",
+  bindTarget: "operator",
+  requireMention: true,
+  approvalMode: "balanced",
+  approvalTimeoutMs: 120_000,
+  repoRoot: "/work/repo",
+};
+
+test("status：未运行时只说未运行，并给出启动方式", () => {
+  const out = renderStatus({ running: false });
+  assert.match(out, /未运行/);
+  assert.match(out, /\/feishu start/);
+});
+
+test("status：运行中列出连接、绑定、策略、审批各项", () => {
+  const out = renderStatus({
+    running: true,
+    config: CFG,
+    boundChatId: "oc_bound",
+    streaming: false,
+    turnApproved: false,
+  });
+  assert.match(out, /运行中/);
+  assert.match(out, /cli_abc/, "应用 id");
+  assert.match(out, /oc_bound/, "绑定的会话");
+  assert.match(out, /私信操作员/, "绑定方式说人话，不是回显 bindTarget 原值");
+  assert.match(out, /所有人可私聊/, "私聊策略");
+  assert.match(out, /balanced/, "审批档位");
+  assert.match(out, /2m/, "审批超时按时长渲染");
+  assert.match(out, /\/work\/repo/, "仓库根");
+});
+
+test("status：绝不泄露 appSecret", () => {
+  const out = renderStatus({ running: true, config: CFG, boundChatId: "oc_x" });
+  assert.equal(out.includes("SUPER_SECRET_VALUE"), false);
+});
+
+test("status：尚未绑定时说明下一条消息会绑定", () => {
+  const out = renderStatus({ running: true, config: CFG });
+  assert.match(out, /尚未绑定/);
+});
+
+test("status：流式中与本回合豁免都要体现出来", () => {
+  const busy = renderStatus({
+    running: true,
+    config: CFG,
+    boundChatId: "oc_x",
+    streaming: true,
+    turnApproved: true,
+  });
+  assert.match(busy, /回合进行中/);
+  assert.match(busy, /本回合全部允许/);
+
+  const idle = renderStatus({ running: true, config: CFG, boundChatId: "oc_x" });
+  assert.match(idle, /空闲/);
+  assert.equal(idle.includes("本回合全部允许"), false, "没开豁免就不该提");
+});
+
+test("status：群白名单为空要说明是「不限」，而不是显示空数组", () => {
+  const out = renderStatus({
+    running: true,
+    config: { ...CFG, groupAllowlist: [] },
+    boundChatId: "oc_x",
+  });
+  assert.match(out, /不限/);
+});
+
+test("chatLabel：有名字就用名字", () => {
+  assert.equal(chatLabel({ name: "研发群", chatType: "group" }), "研发群");
+});
+
+test("chatLabel：私聊没有名字（飞书返回 null），退回「私聊」", () => {
+  assert.equal(chatLabel({ chatType: "p2p" }), "私聊");
+  assert.equal(chatLabel({ name: "", chatType: "p2p" }), "私聊");
+});
+
+test("chatLabel：没名字的群退回「群聊」", () => {
+  assert.equal(chatLabel({ chatType: "group" }), "群聊");
+});
+
+test("status：知道会话名称时，名称和 id 都要显示", () => {
+  const out = renderStatus({
+    running: true,
+    config: CFG,
+    boundChatId: "oc_bound",
+    boundChatName: "研发群",
+  });
+  assert.match(out, /研发群/);
+  assert.match(out, /oc_bound/, "id 仍要留着，排查时要用");
+});
+
+test("status：查不到名称时只显示 id，不显示空括号", () => {
+  const out = renderStatus({ running: true, config: CFG, boundChatId: "oc_bound" });
+  assert.match(out, /oc_bound/);
+  assert.equal(/·\s+·/.test(out), false, "不该留下空占位");
 });

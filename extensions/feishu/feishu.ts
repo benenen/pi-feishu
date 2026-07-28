@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createLarkChannel, LoggerLevel } from "@larksuiteoapi/node-sdk";
 import type { LarkChannel } from "@larksuiteoapi/node-sdk";
 import { createSdkLogger, type LogFn } from "./log.ts";
+import { chatLabel } from "./renderer.ts";
 import type { AppendSink } from "./turn-stream.ts";
 import type { Asker, Decision } from "./approval.ts";
 import type { Config } from "./config.ts";
@@ -151,6 +152,44 @@ export class FeishuGateway {
     const target = resolveTarget(this.#bound, to);
     if (!channel || !target) return;
     await channel.send(target, { markdown });
+  }
+
+  /**
+   * 已绑定会话的人类可读名称。查不到就返回 undefined —— 状态里退回只显示 id，
+   * 绝不能让一次状态查询因为这个可有可无的信息而失败。
+   */
+  async describeBoundChat(): Promise<string | undefined> {
+    const channel = this.#channel;
+    const bound = this.#bound;
+    if (!channel || !bound) return undefined;
+    try {
+      const info = await channel.getChatInfo(bound);
+      return chatLabel(info);
+    } catch (err) {
+      this.#log(`查询会话名称失败：${String(err)}`, "warning");
+      return undefined;
+    }
+  }
+
+  /**
+   * 主动私信某人，返回该私聊会话的 chatId。
+   *
+   * 走 rawClient 而不是 channel.send()，是因为后者只回 messageId ——
+   * 而主动绑定需要的正是 chat_id，im.v1.message.create 的响应里就带着它，
+   * 一次调用拿全，不用再多查一次消息。
+   */
+  async announce(openId: string, text: string): Promise<string | undefined> {
+    const channel = this.#channel;
+    if (!channel) return undefined;
+    const res = await channel.rawClient.im.v1.message.create({
+      data: {
+        receive_id: openId,
+        msg_type: "text",
+        content: JSON.stringify({ text }),
+      },
+      params: { receive_id_type: "open_id" },
+    });
+    return res.data?.chat_id;
   }
 
   async downloadImage(fileKey: string): Promise<Buffer | undefined> {

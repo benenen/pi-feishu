@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  announceAndBind,
+  bindToChat,
   Bridge,
   decideDelivery,
   parseControlCommand,
@@ -89,6 +91,8 @@ const CONFIG = {
   dmAllowlist: ["ou_1"],
   groupAllowlist: [],
   approverAllowlist: ["ou_1"],
+  operatorOpenId: "ou_1",
+  bindTarget: "operator",
   requireMention: true,
   approvalMode: "balanced" as const,
   approvalTimeoutMs: 1000,
@@ -246,4 +250,107 @@ test("拒绝带 scope 也不会开启豁免 —— 只有批准才算", async ()
   assert.equal((await bridge.gateToolCall("bash", { command: "rm -rf a" }, undefined))?.block, true);
   assert.equal((await bridge.gateToolCall("bash", { command: "rm -rf b" }, undefined))?.block, true);
   assert.equal(n, 2);
+});
+
+// ── 主动私信并绑定 ──────────────────────────────────────────────────
+
+interface AnnounceCall {
+  openId: string;
+  text: string;
+}
+
+function fakeAnnouncer(
+  calls: AnnounceCall[],
+  result: string | undefined | Error,
+  bound?: string,
+) {
+  return {
+    boundChatId: bound,
+    bind(chatId: string) {
+      this.boundChatId = chatId;
+    },
+    async announce(openId: string, text: string) {
+      calls.push({ openId, text });
+      if (result instanceof Error) throw result;
+      return result;
+    },
+  };
+}
+
+test("announceAndBind：私信成功后用回来的 chat_id 完成绑定", async () => {
+  const calls: AnnounceCall[] = [];
+  const gw = fakeAnnouncer(calls, "oc_p2p_1");
+  const ok = await announceAndBind(gw, "ou_me", "已就绪", () => {});
+  assert.equal(ok, true);
+  assert.equal(gw.boundChatId, "oc_p2p_1");
+  assert.deepEqual(calls, [{ openId: "ou_me", text: "已就绪" }]);
+});
+
+test("announceAndBind：私信失败不抛异常，也不绑定 —— start 不能被它带崩", async () => {
+  const logged: string[] = [];
+  const gw = fakeAnnouncer([], new Error("bot 对该用户不可用"));
+  const ok = await announceAndBind(gw, "ou_me", "已就绪", (m) => logged.push(m));
+  assert.equal(ok, false);
+  assert.equal(gw.boundChatId, undefined);
+  assert.ok(logged.some((m) => m.includes("不可用")), "失败原因要留在日志里");
+});
+
+test("announceAndBind：拿不到 chat_id 时不绑定", async () => {
+  const gw = fakeAnnouncer([], undefined);
+  assert.equal(await announceAndBind(gw, "ou_me", "已就绪", () => {}), false);
+  assert.equal(gw.boundChatId, undefined);
+});
+
+test("announceAndBind：已绑定时不再打扰操作员", async () => {
+  const calls: AnnounceCall[] = [];
+  const gw = fakeAnnouncer(calls, "oc_new", "oc_already");
+  const ok = await announceAndBind(gw, "ou_me", "已就绪", () => {});
+  assert.equal(ok, false);
+  assert.equal(gw.boundChatId, "oc_already", "原有绑定不能被顶掉");
+  assert.deepEqual(calls, [], "不该发消息");
+});
+
+// ── bindTarget 为群 chat_id：直接绑，不需要先私信 ───────────────────
+
+function fakeChatBinder(sent: { chatId: string; text: string }[], fail?: Error) {
+  return {
+    boundChatId: undefined as string | undefined,
+    bind(chatId: string) {
+      this.boundChatId = chatId;
+    },
+    async sendText(text: string, to?: string) {
+      if (fail) throw fail;
+      sent.push({ chatId: to ?? "(bound)", text });
+    },
+  };
+}
+
+test("bindToChat：直接绑定指定会话并往里发一条就绪通知", async () => {
+  const sent: { chatId: string; text: string }[] = [];
+  const gw = fakeChatBinder(sent);
+  assert.equal(await bindToChat(gw, "oc_group", "已就绪", () => {}), true);
+  assert.equal(gw.boundChatId, "oc_group");
+  assert.deepEqual(sent, [{ chatId: "oc_group", text: "已就绪" }]);
+});
+
+test("bindToChat：通知发不出去仍然完成绑定 —— 入站过滤不能因为出站坏了就失效", async () => {
+  const logged: string[] = [];
+  const gw = fakeChatBinder([], new Error("机器人不在该群"));
+  assert.equal(await bindToChat(gw, "oc_group", "已就绪", (m) => logged.push(m)), true);
+  assert.equal(gw.boundChatId, "oc_group");
+  assert.ok(logged.some((m) => m.includes("不在该群")));
+});
+
+test("bindToChat：已绑定时不动它", async () => {
+  const sent: { chatId: string; text: string }[] = [];
+  const gw = fakeChatBinder(sent);
+  gw.boundChatId = "oc_already";
+  assert.equal(await bindToChat(gw, "oc_group", "已就绪", () => {}), false);
+  assert.equal(gw.boundChatId, "oc_already");
+  assert.deepEqual(sent, []);
+});
+
+test("飞书侧也能发 /feishu unbind 解绑", () => {
+  assert.deepEqual(parseControlCommand("/feishu unbind"), { kind: "unbind" });
+  assert.deepEqual(parseControlCommand("  /feishu   UNBIND "), { kind: "unbind" });
 });

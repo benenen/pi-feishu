@@ -4,7 +4,15 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { ConfigError, loadConfig, readConfigFile, type Config } from "./config.ts";
 import { createLogger } from "./log.ts";
 import { FeishuGateway } from "./feishu.ts";
-import { Bridge, decideDelivery, parseControlCommand, shouldAccept } from "./bridge.ts";
+import {
+  announceAndBind,
+  bindToChat,
+  Bridge,
+  decideDelivery,
+  parseControlCommand,
+  shouldAccept,
+} from "./bridge.ts";
+import { renderStatus } from "./renderer.ts";
 import type { Asker } from "./approval.ts";
 
 /** 会话切换时等待断开的上限，防止飞书 API 挂住把 /new 一起冻住 */
@@ -93,12 +101,14 @@ export default function (pi: ExtensionAPI) {
           const control = parseControlCommand(msg.text);
           if (control) {
             if (control.kind === "stop") await stop((m) => void gw.sendText(m));
-            else if (control.kind === "status") {
-              await gw.sendText(
-                `运行中，绑定会话：${gw.boundChatId ?? "（尚未绑定）"}，审批模式：${config?.approvalMode}`,
-              );
+            else if (control.kind === "unbind") {
+              // 先回执再解绑：解绑后 sendText 没有默认收件方，必须显式指定本会话
+              await gw.sendText("已解绑，下一条消息会重新绑定会话。", msg.chatId);
+              gw.unbind();
+            } else if (control.kind === "status") {
+              await gw.sendText(await statusText());
             } else {
-              await gw.sendText("可用命令：/feishu status、/feishu stop。start 只能从终端发起。");
+              await gw.sendText("可用命令：/feishu status、/feishu unbind、/feishu stop。start 只能从终端发起。");
             }
             return;
           }
@@ -123,7 +133,31 @@ export default function (pi: ExtensionAPI) {
     }
     gateway = gw;
     bridge = br;
-    notify("飞书桥接已启动，等待消息绑定会话");
+
+    // 按 bindTarget 决定绑谁。绑不上都不是错误 —— 退回等第一条入站消息即可
+    const greeting = `pi 会话已就绪（${cwd}），直接发消息即可。`;
+    let boundTo: string | undefined;
+    if (cfg.bindTarget === "operator") {
+      if (await announceAndBind(gw, cfg.operatorOpenId, greeting, log)) boundTo = "与操作员的私聊";
+    } else if (cfg.bindTarget.startsWith("oc_")) {
+      if (await bindToChat(gw, cfg.bindTarget, greeting, log)) boundTo = cfg.bindTarget;
+    }
+    // "none"：什么都不做，群里 @ 或私聊第一条消息来绑定
+    notify(
+      boundTo ? `飞书桥接已启动，已绑定 ${boundTo}` : "飞书桥接已启动，等待消息绑定会话",
+    );
+  }
+
+  /** 终端与飞书两侧共用同一份状态文案，避免两边说法不一致 */
+  async function statusText(): Promise<string> {
+    return renderStatus({
+      running: gateway !== undefined,
+      config,
+      boundChatId: gateway?.boundChatId,
+      boundChatName: await gateway?.describeBoundChat(),
+      streaming: bridge?.isStreaming,
+      turnApproved: bridge?.turnApproved,
+    });
   }
 
   async function stop(notify: (msg: string) => void): Promise<void> {
@@ -141,20 +175,21 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("feishu", {
-    description: "控制飞书桥接：start / stop / status",
+    description: "控制飞书桥接：start / stop / status / unbind",
     handler: async (args, ctx) => {
       ctxRef = ctx;
       const notify = (msg: string) => ctx.ui.notify(msg, "info");
       const sub = args.trim() || "status";
       if (sub === "start") await start(ctx.cwd, notify);
       else if (sub === "stop") await stop(notify);
-      else if (sub === "status") {
-        notify(
-          gateway
-            ? `运行中，绑定会话：${gateway.boundChatId ?? "（尚未绑定）"}，审批模式：${config?.approvalMode}`
-            : "未运行。用 /feishu start 启动。",
-        );
-      } else notify(`未知子命令：${sub}。可用：start / stop / status`);
+      else if (sub === "unbind") {
+        if (!gateway) notify("飞书桥接未在运行");
+        else {
+          gateway.unbind();
+          notify("已解绑，下一条消息会重新绑定会话");
+        }
+      }
+      else if (sub === "status") notify(await statusText()); else notify(`未知子命令：${sub}。可用：start / stop / status / unbind`);
     },
   });
 

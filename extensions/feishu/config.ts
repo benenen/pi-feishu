@@ -18,6 +18,15 @@ export interface Config {
   groupAllowlist: string[];
   /** 谁的卡片点击算数。飞书 SDK 不对 card.action.trigger 做任何白名单过滤 */
   approverAllowlist: string[];
+  /** start 后主动私信谁并绑定该私聊。未配则取 approverAllowlist 第一个 */
+  operatorOpenId: string;
+  /**
+   * start 后绑定谁：
+   *   "operator" —— 私信 operatorOpenId 并绑定该私聊（默认）
+   *   "none"     —— 不主动绑，等第一条入站消息（群里 @ 要用这个或直接填群 id）
+   *   "oc_xxx"   —— 直接绑定该会话（群）
+   */
+  bindTarget: string;
   requireMention: boolean;
   approvalMode: ApprovalMode;
   approvalTimeoutMs: number;
@@ -151,6 +160,26 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
     );
   }
 
+  // 主动绑定的收件人。approverAllowlist 校验过非空，所以这里一定能取到值；
+  // 名单里有多人时取第一个 —— 他们都是已授权的审批人，发给谁都不越权
+  let operatorOpenId = approverAllowlist[0] ?? "";
+  if (merged.operatorOpenId !== undefined) {
+    if (typeof merged.operatorOpenId === "string") operatorOpenId = merged.operatorOpenId;
+    else problems.push("operatorOpenId 必须是字符串");
+  }
+
+  // 群 chat_id 一律 oc_ 开头；ou_（open_id）不是会话 id，填错了会绑到一个
+  // 永远收不到消息的目标上，只能在这里拦
+  let bindTarget = "operator";
+  if (merged.bindTarget !== undefined) {
+    const t = merged.bindTarget;
+    if (typeof t === "string" && (t === "operator" || t === "none" || t.startsWith("oc_"))) {
+      bindTarget = t;
+    } else {
+      problems.push('bindTarget 必须是 "operator"、"none" 或以 oc_ 开头的会话 id');
+    }
+  }
+
   let approvalMode: ApprovalMode = "balanced";
   if (merged.approvalMode !== undefined) {
     if (
@@ -183,6 +212,8 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
     dmAllowlist,
     groupAllowlist,
     approverAllowlist,
+    operatorOpenId,
+    bindTarget,
     requireMention,
     approvalMode,
     approvalTimeoutMs,

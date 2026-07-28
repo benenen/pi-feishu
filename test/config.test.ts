@@ -225,3 +225,45 @@ test("dmMode=open 也必须显式指定 approverAllowlist —— 否则谁都能
   );
   assert.ok(e.problems.some((p) => p.includes("approverAllowlist")));
 });
+
+test("operatorOpenId 未配时默认取 approverAllowlist 第一个", () => {
+  const c = loadConfig({
+    files: [{ ...base, approverAllowlist: ["ou_a", "ou_b"] }],
+    env: {},
+    cwd: "/w",
+  });
+  assert.equal(c.operatorOpenId, "ou_a");
+});
+
+test("operatorOpenId 可以显式指定", () => {
+  const c = loadConfig({
+    files: [{ ...base, operatorOpenId: "ou_boss" }],
+    env: {},
+    cwd: "/w",
+  });
+  assert.equal(c.operatorOpenId, "ou_boss");
+});
+
+test("operatorOpenId 必须是字符串", () => {
+  const e = throwsConfigError(() =>
+    loadConfig({ files: [{ ...base, operatorOpenId: 123 }], env: {}, cwd: "/w" }),
+  );
+  assert.ok(e.problems.some((p) => p.includes("operatorOpenId")));
+});
+
+test("bindTarget 默认 operator", () => {
+  assert.equal(loadConfig({ files: [base], env: {}, cwd: "/w" }).bindTarget, "operator");
+});
+
+test("bindTarget 接受 operator / none / 群 chat_id", () => {
+  for (const t of ["operator", "none", "oc_abc123"]) {
+    assert.equal(loadConfig({ files: [{ ...base, bindTarget: t }], env: {}, cwd: "/w" }).bindTarget, t);
+  }
+});
+
+test("bindTarget 拒绝既不是关键字也不像 chat_id 的值", () => {
+  const e = throwsConfigError(() =>
+    loadConfig({ files: [{ ...base, bindTarget: "ou_someone" }], env: {}, cwd: "/w" }),
+  );
+  assert.ok(e.problems.some((p) => p.includes("bindTarget")), "open_id 不是会话 id，要拦");
+});
