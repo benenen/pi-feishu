@@ -171,3 +171,78 @@ test("gateToolCall：审批通道全挂时 fail-closed", async () => {
   assert.equal(blocked?.block, true);
   assert.ok(blocked?.reason.includes("审批通道不可用"));
 });
+
+// ── 本回合全部允许 ──────────────────────────────────────────────────
+
+/** 卡片返回带 scope:"turn" 的批准 */
+const turnApprover = (calls: { n: number }) =>
+  fakeGateway({
+    cardAsker: async () => {
+      calls.n += 1;
+      return { allow: true, reason: "飞书批准", scope: "turn" as const };
+    },
+  });
+
+test("批准一次「本回合全部允许」后，同回合内后续危险调用不再询问", async () => {
+  const calls = { n: 0 };
+  const bridge = new Bridge(CONFIG, turnApprover(calls), () => {}, () => 0, 1000);
+  bridge.startTurn();
+
+  assert.equal(await bridge.gateToolCall("bash", { command: "rm -rf a" }, undefined), undefined);
+  assert.equal(await bridge.gateToolCall("bash", { command: "chmod 777 ." }, undefined), undefined);
+  assert.equal(await bridge.gateToolCall("write", { path: "/etc/x" }, undefined), undefined);
+  assert.equal(calls.n, 1, "只应该问过一次");
+});
+
+test("回合结束后豁免失效，下个回合重新询问", async () => {
+  const calls = { n: 0 };
+  const bridge = new Bridge(CONFIG, turnApprover(calls), () => {}, () => 0, 1000);
+
+  bridge.startTurn();
+  await bridge.gateToolCall("bash", { command: "rm -rf a" }, undefined);
+  await bridge.endTurn();
+
+  bridge.startTurn();
+  await bridge.gateToolCall("bash", { command: "rm -rf b" }, undefined);
+  assert.equal(calls.n, 2, "新回合必须重新问");
+});
+
+test("不带 scope 的普通批准只对当次生效", async () => {
+  let n = 0;
+  const bridge = new Bridge(
+    CONFIG,
+    fakeGateway({
+      cardAsker: async () => {
+        n += 1;
+        return { allow: true, reason: "飞书批准" };
+      },
+    }),
+    () => {},
+    () => 0,
+    1000,
+  );
+  bridge.startTurn();
+  await bridge.gateToolCall("bash", { command: "rm -rf a" }, undefined);
+  await bridge.gateToolCall("bash", { command: "rm -rf b" }, undefined);
+  assert.equal(n, 2, "普通批准不能顺带豁免后续");
+});
+
+test("拒绝带 scope 也不会开启豁免 —— 只有批准才算", async () => {
+  let n = 0;
+  const bridge = new Bridge(
+    CONFIG,
+    fakeGateway({
+      cardAsker: async () => {
+        n += 1;
+        return { allow: false, reason: "飞书拒绝", scope: "turn" as const };
+      },
+    }),
+    () => {},
+    () => 0,
+    1000,
+  );
+  bridge.startTurn();
+  assert.equal((await bridge.gateToolCall("bash", { command: "rm -rf a" }, undefined))?.block, true);
+  assert.equal((await bridge.gateToolCall("bash", { command: "rm -rf b" }, undefined))?.block, true);
+  assert.equal(n, 2);
+});

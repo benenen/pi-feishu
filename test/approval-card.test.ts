@@ -11,16 +11,17 @@ import {
 
 const REQ = { toolName: "bash", input: { command: "rm -rf /tmp/x" } };
 
-test("审批卡片带一对按钮，value 结构可被自己解析回来", () => {
+test("审批卡片带三个按钮，value 结构可被自己解析回来", () => {
   const card = buildApprovalCard("ap-1", REQ) as {
     elements: { tag: string; actions?: { value: unknown }[] }[];
   };
   const action = card.elements.find((e) => e.tag === "action");
   assert.ok(action?.actions, "应有 action 元素");
-  assert.equal(action.actions.length, 2);
+  assert.equal(action.actions.length, 3);
 
-  const [allow, deny] = action.actions.map((a) => parseApprovalAction(a.value));
+  const [allow, turn, deny] = action.actions.map((a) => parseApprovalAction(a.value));
   assert.deepEqual(allow, { id: "ap-1", allow: true });
+  assert.deepEqual(turn, { id: "ap-1", allow: true, scope: "turn" });
   assert.deepEqual(deny, { id: "ap-1", allow: false });
 });
 
@@ -151,4 +152,28 @@ test("卡片正文按码点截断，不会切碎 emoji 导致整张卡片发不�
   );
   const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
   assert.equal(lone.test(json), false);
+});
+
+test("卡片带「本回合全部允许」按钮，动作里标出 scope", () => {
+  const card = buildApprovalCard("ap-1", { toolName: "bash", input: { command: "rm -rf a" } }) as {
+    elements: { tag: string; actions?: { text: { content: string }; value: unknown }[] }[];
+  };
+  const actions = card.elements.find((e) => e.tag === "action")?.actions ?? [];
+  const turnBtn = actions.find((a) => a.text.content === "本回合全部允许");
+  assert.ok(turnBtn, "应该有第三个按钮");
+  assert.deepEqual(parseApprovalAction(turnBtn?.value), { id: "ap-1", allow: true, scope: "turn" });
+});
+
+test("普通允许/拒绝不带 scope", () => {
+  assert.deepEqual(
+    parseApprovalAction({ kind: APPROVAL_KIND, id: "ap-1", allow: true }),
+    { id: "ap-1", allow: true },
+  );
+});
+
+test("伪造的 scope 值不被接受 —— 只认字面量 turn", () => {
+  assert.deepEqual(
+    parseApprovalAction({ kind: APPROVAL_KIND, id: "ap-1", allow: true, scope: "session" }),
+    { id: "ap-1", allow: true },
+  );
 });

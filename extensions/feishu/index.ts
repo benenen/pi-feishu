@@ -1,7 +1,8 @@
 import path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ConfigError, loadConfig, readConfigFile, type Config } from "./config.ts";
+import { createLogger } from "./log.ts";
 import { FeishuGateway } from "./feishu.ts";
 import { Bridge, decideDelivery, parseControlCommand, shouldAccept } from "./bridge.ts";
 import type { Asker } from "./approval.ts";
@@ -39,7 +40,10 @@ export default function (pi: ExtensionAPI) {
   let bridge: Bridge | undefined;
   let config: Config | undefined;
 
-  const log = (msg: string) => console.error(`[pi-feishu] ${msg}`);
+  // ExtensionContext 的属性是惰性 getter，存下引用晚点读拿到的仍是当前的 UI；
+  // 每个 handler 都带 ctx，这里只在生命周期入口刷新就够了
+  let ctxRef: ExtensionContext | undefined;
+  const log = createLogger(() => ctxRef);
 
   // gateway 只在 connect() 返回后才赋值，光靠它挡不住在途的第二次 start：
   // autoStart 撞上手动 /feishu start，会建出两条 WS 连接抢同一批消息 ——
@@ -103,7 +107,7 @@ export default function (pi: ExtensionAPI) {
           if (text === "") return;
           await pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
         } catch (err) {
-          log(`处理入站消息失败：${String(err)}`);
+          log(`处理入站消息失败：${String(err)}`, "error");
         }
       })();
     });
@@ -138,6 +142,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("feishu", {
     description: "控制飞书桥接：start / stop / status",
     handler: async (args, ctx) => {
+      ctxRef = ctx;
       const notify = (msg: string) => ctx.ui.notify(msg, "info");
       const sub = args.trim() || "status";
       if (sub === "start") await start(ctx.cwd, notify);
@@ -153,6 +158,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    ctxRef = ctx;
     let cfg: Config | undefined;
     try {
       cfg = resolveConfig(ctx.cwd);
@@ -164,7 +170,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     await withTimeout(stop(() => {}), SHUTDOWN_TIMEOUT_MS, () =>
-      log("断开飞书超时，放弃等待"),
+      log("断开飞书超时，放弃等待", "warning"),
     );
   });
 
@@ -173,7 +179,7 @@ export default function (pi: ExtensionAPI) {
   // 飞书 API 一旦挂住（不是拒绝，是不返回），/new 就跟着永久冻住
   const stopForReplacement = async () => {
     await withTimeout(stop(() => {}), SHUTDOWN_TIMEOUT_MS, () =>
-      log("会话切换时断开飞书超时，放弃等待"),
+      log("会话切换时断开飞书超时，放弃等待", "warning"),
     );
   };
   pi.on("session_before_switch", stopForReplacement);

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { createLarkChannel } from "@larksuiteoapi/node-sdk";
+import { createLarkChannel, LoggerLevel } from "@larksuiteoapi/node-sdk";
 import type { LarkChannel } from "@larksuiteoapi/node-sdk";
+import { createSdkLogger, type LogFn } from "./log.ts";
 import type { AppendSink } from "./turn-stream.ts";
 import type { Asker, Decision } from "./approval.ts";
 import type { Config } from "./config.ts";
@@ -27,9 +28,9 @@ export class FeishuGateway {
 
   // strip-only 模式不支持构造函数参数属性，依赖写成显式字段
   readonly #config: Config;
-  readonly #log: (msg: string) => void;
+  readonly #log: LogFn;
 
-  constructor(config: Config, log: (msg: string) => void) {
+  constructor(config: Config, log: LogFn) {
     this.#config = config;
     this.#log = log;
   }
@@ -66,6 +67,10 @@ export class FeishuGateway {
         respondToMentionAll: false,
       },
       outbound: { markdownConverter: "builtin" },
+      // 不接管的话 SDK 用 defaultLogger，直接写 console.log —— 绕过 pi 的 UI 打进 TUI。
+      // level 压到 warn：连接生命周期我们自己在下面已经报了，SDK 的 info 只是重复刷屏
+      logger: createSdkLogger(this.#log),
+      loggerLevel: LoggerLevel.warn,
     });
 
     channel.on("message", (msg) => {
@@ -86,24 +91,30 @@ export class FeishuGateway {
       // 不自己鉴权的话，群里任何看得见卡片的人都能点「允许」——
       // 让 agent 干活的人自己批准自己，闸门等于没有。
       if (evt.chatId !== this.#bound) {
-        this.#log(`忽略来自未绑定会话的卡片点击：${evt.chatId}`);
+        this.#log(`忽略来自未绑定会话的卡片点击：${evt.chatId}`, "warning");
         return;
       }
       if (!this.#config.approverAllowlist.includes(evt.operator.openId)) {
-        this.#log(`忽略非授权审批人的卡片点击：${evt.operator.openId}`);
+        this.#log(`忽略非授权审批人的卡片点击：${evt.operator.openId}`, "warning");
         return;
       }
 
       const messageId = this.#approvals.settle(action.id, {
         allow: action.allow,
-        reason: action.allow ? "飞书批准" : "飞书拒绝",
+        reason: action.scope === "turn" ? "飞书批准（本回合全部允许）" : action.allow ? "飞书批准" : "飞书拒绝",
+        ...(action.scope === "turn" ? { scope: "turn" as const } : {}),
       });
-      if (messageId) void this.#settleCard(messageId, action.allow ? "已批准" : "已拒绝");
+      if (messageId) {
+        void this.#settleCard(
+          messageId,
+          action.scope === "turn" ? "已批准（本回合全部允许）" : action.allow ? "已批准" : "已拒绝",
+        );
+      }
     });
 
-    channel.on("reject", (evt) => this.#log(`飞书拒收消息：${evt.reason}`));
-    channel.on("error", (err) => this.#log(`飞书错误：${err.code} ${err.message}`));
-    channel.on("reconnecting", () => this.#log("飞书连接断开，重连中"));
+    channel.on("reject", (evt) => this.#log(`飞书拒收消息：${evt.reason}`, "warning"));
+    channel.on("error", (err) => this.#log(`飞书错误：${err.code} ${err.message}`, "error"));
+    channel.on("reconnecting", () => this.#log("飞书连接断开，重连中", "warning"));
     channel.on("reconnected", () => this.#log("飞书连接已恢复"));
 
     await channel.connect();
@@ -122,7 +133,7 @@ export class FeishuGateway {
     this.#bound = undefined;
     if (channel) {
       await channel.disconnect().catch((err: unknown) => {
-        this.#log(`飞书断开连接时出错：${String(err)}`);
+        this.#log(`飞书断开连接时出错：${String(err)}`, "warning");
       });
     }
   }
@@ -146,7 +157,7 @@ export class FeishuGateway {
     try {
       return await this.#channel?.downloadResource(fileKey, "image");
     } catch (err) {
-      this.#log(`图片下载失败 ${fileKey}：${String(err)}`);
+      this.#log(`图片下载失败 ${fileKey}：${String(err)}`, "warning");
       return undefined;
     }
   }
@@ -202,7 +213,7 @@ export class FeishuGateway {
     try {
       await this.#channel?.updateCard(messageId, buildSettledCard(status));
     } catch (err) {
-      this.#log(`审批卡片收尾失败：${String(err)}`);
+      this.#log(`审批卡片收尾失败：${String(err)}`, "error");
     }
   }
 }

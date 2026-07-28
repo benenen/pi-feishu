@@ -6,6 +6,11 @@ export interface ApprovalRequest {
 export interface Decision {
   allow: boolean;
   reason: string;
+  /**
+   * "turn"：批准的同时豁免本 agent 回合内后续全部审批。
+   * 只在 allow 为真时有意义；回合结束即失效，不跨回合、不跨会话。
+   */
+  scope?: "turn";
 }
 
 export type Asker = (req: ApprovalRequest, signal: AbortSignal) => Promise<Decision>;

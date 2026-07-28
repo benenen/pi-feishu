@@ -155,3 +155,15 @@ test("只配 groupAllowlist 且指定了审批人就能通过", () => {
   });
   assert.deepEqual(c.approverAllowlist, ["ou_x"]);
 });
+
+test("approvalMode 接受 relaxed", () => {
+  const c = loadConfig({ files: [{ ...base, approvalMode: "relaxed" }], env: {}, cwd: "/w" });
+  assert.equal(c.approvalMode, "relaxed");
+});
+
+test("approvalMode 仍然拒绝乱填的值", () => {
+  const e = throwsConfigError(() =>
+    loadConfig({ files: [{ ...base, approvalMode: "yolo" }], env: {}, cwd: "/w" }),
+  );
+  assert.ok(e.problems.some((p) => p.includes("approvalMode")));
+});

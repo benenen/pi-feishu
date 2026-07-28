@@ -35,11 +35,31 @@ pi install git:github.com/you/pi-feishu
 | `groupAllowlist` | `[]` | 允许的群 chat_id |
 | `approverAllowlist` | 同 `dmAllowlist` | **谁的卡片点击算数**。飞书 SDK 不对卡片回调做白名单过滤，只配 `groupAllowlist` 时必须显式指定，否则群里任何人都能点「允许」 |
 | `requireMention` | `true` | 群聊是否需要 @ 机器人 |
-| `approvalMode` | `"balanced"` | `balanced` 只拦破坏性操作；`strict` 所有 bash/write/edit 都要批 |
+| `approvalMode` | `"balanced"` | `relaxed` 只拦黑名单里的破坏性命令；`balanced` 只放行只读命令白名单；`strict` 所有 bash/write/edit 都要批。详见下方「审批档位」 |
 | `approvalTimeoutMs` | `120000` | 审批超时，超时即拒绝 |
 | `repoRoot` | 当前 cwd | 判定「写到范围外」的基准 |
 
 `dmAllowlist` 和 `groupAllowlist` 不能同时为空；`approverAllowlist` 解析后也不能为空。
+
+## 审批档位
+
+| 档位 | bash 判定模型 | 适用 |
+|---|---|---|
+| `strict` | 除 read/grep/find/ls 外一律要批 | 完全不信任的环境 |
+| `balanced`（默认） | **白名单**：命令名 + 标志都在只读表里才放行 | 日常 |
+| `relaxed` | **黑名单**：只拦明确破坏性的命令 | 你信任 agent 与仓库环境时 |
+
+`balanced` 支持管道与 `&&` / `||` / `;` 串联 —— 每一段都必须自己过白名单，
+所以 `grep -rn foo . | head -20` 放行，而 `ls | sh` 照样死在 `sh` 上。
+重定向（`>` `>>` `<`）和未加引号的 glob 仍一律要批：前者能把任意内容写进任意路径，
+后者展开成什么在判定时看不见。
+
+`relaxed` 是**黑名单**模型，与另两档相反 —— 枚举危险必然有漏网，这正是它用便利换来的代价。
+它仍然保留 write/edit 的仓库边界检查。
+
+审批卡片上有三个按钮：**允许** / **本回合全部允许** / **拒绝**。
+中间那个只在当前 agent 回合内有效，回合一结束立即失效，不跨回合、不跨会话。
+密集操作时点它，省得一条条批。
 
 ## 飞书应用配置
 

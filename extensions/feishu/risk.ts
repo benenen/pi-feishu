@@ -37,12 +37,20 @@ export interface FlagPolicy {
   long: ReadonlySet<string>;
   /** 是否允许 `-5` 这种数字标志（git log -5、head -20、find -mtime -5） */
   numeric?: boolean;
+  /**
+   * 位置参数个数上限。`uniq 输入 输出` 的第二个位置参数就是输出文件 ——
+   * 不含任何标志也不含任何 shell 元字符，只能靠数个数拦。
+   * 未设置表示不限制。标志的取值也会被算作位置参数，宁可多拦。
+   */
+  maxPositionals?: number;
 }
 
 /** 无论子命令如何都不需要区分的只读命令 */
 const READ_ONLY_COMMANDS = new Map<string, FlagPolicy>([
   ["ls", { short: "laAhRrtSU1dFi", long: new Set(["all", "almost-all", "human-readable", "reverse", "recursive", "sort", "time", "directory", "classify", "color"]) }],
   ["pwd", { short: "LP", long: new Set() }],
+  // shell 内建，没有任何写能力；`cd 某目录 && 只读命令` 是高频写法
+  ["cd", { short: "LP", maxPositionals: 1, long: new Set() }],
   ["cat", { short: "nbEsTAv", long: new Set(["number", "number-nonblank", "show-ends", "show-all"]) }],
   ["head", { short: "nqvc", numeric: true, long: new Set(["lines", "bytes", "quiet", "verbose"]) }],
   ["tail", { short: "nfqvc", numeric: true, long: new Set(["lines", "bytes", "follow", "quiet", "verbose"]) }],
@@ -59,6 +67,25 @@ const READ_ONLY_COMMANDS = new Map<string, FlagPolicy>([
   ["dirname", { short: "z", long: new Set(["zero"]) }],
   ["realpath", { short: "emqszLP", long: new Set(["canonicalize-existing", "canonicalize-missing", "quiet", "relative-to", "zero"]) }],
   ["readlink", { short: "femnqsvz", long: new Set(["canonicalize", "canonicalize-existing", "canonicalize-missing", "no-newline", "quiet", "silent", "verbose", "zero"]) }],
+  // 管道里的常用过滤器。写文件的口子逐个堵掉：
+  // sort 的 -o/--output、tree 的 -o —— 都能把任意内容落到任意路径
+  ["sort", { short: "bcdfghiMnrRsuVzk", numeric: true, long: new Set(["reverse", "numeric-sort", "general-numeric-sort", "human-numeric-sort", "version-sort", "month-sort", "unique", "ignore-case", "ignore-leading-blanks", "dictionary-order", "key", "field-separator", "stable", "check", "zero-terminated", "buffer-size", "parallel"]) }],
+  // uniq 的第二个位置参数就是输出文件，只能靠 maxPositionals 拦
+  ["uniq", { short: "cdDiufswz", numeric: true, maxPositionals: 1, long: new Set(["count", "repeated", "all-repeated", "unique", "ignore-case", "skip-fields", "skip-chars", "check-chars", "zero-terminated"]) }],
+  ["tr", { short: "dscCt", long: new Set(["delete", "squeeze-repeats", "complement", "truncate-set1"]) }],
+  ["tac", { short: "brs", long: new Set(["before", "regex", "separator"]) }],
+  ["comm", { short: "123zi", numeric: true, long: new Set(["check-order", "nocheck-order", "output-delimiter", "total", "zero-terminated"]) }],
+  // tree 的 -o 写文件，刻意不列
+  ["tree", { short: "adfilnpsugDLRCF", numeric: true, long: new Set(["dirsfirst", "noreport", "filelimit", "prune", "level", "charset", "du", "sort"]) }],
+  // jq 没有写文件的能力（没有 -i / -o）。注意含 {} 的 filter 会先被 RAW_FORBIDDEN 拦掉
+  ["jq", { short: "renjcsSaMC", long: new Set(["raw-output", "raw-input", "null-input", "compact-output", "slurp", "sort-keys", "exit-status", "tab", "indent", "arg", "argjson", "args", "jsonargs", "join-output", "ascii-output", "monochrome-output", "color-output", "seq", "stream"]) }],
+  ["seq", { short: "swf", long: new Set(["separator", "equal-width", "format"]) }],
+  // -c 是校验模式，读取校验文件，不写
+  ["sha256sum", { short: "bctwz", long: new Set(["binary", "check", "tag", "text", "quiet", "status", "warn", "zero"]) }],
+  ["sha1sum", { short: "bctwz", long: new Set(["binary", "check", "tag", "text", "quiet", "status", "warn", "zero"]) }],
+  ["sha512sum", { short: "bctwz", long: new Set(["binary", "check", "tag", "text", "quiet", "status", "warn", "zero"]) }],
+  ["md5sum", { short: "bctwz", long: new Set(["binary", "check", "tag", "text", "quiet", "status", "warn", "zero"]) }],
+  ["cksum", { short: "a", long: new Set(["algorithm", "untagged"]) }],
   ["whoami", { short: "", long: new Set() }],
   ["id", { short: "unrgGZ", long: new Set(["user", "name", "real", "group", "groups", "zero"]) }],
   ["uname", { short: "asrvmnpio", long: new Set(["all", "kernel-name", "kernel-release", "machine", "nodename", "operating-system"]) }],
@@ -105,6 +132,12 @@ const READ_ONLY_SUBCOMMANDS = new Map<string, SubcommandPolicy>([
   ["go", { subcommands: new Set(["test", "vet", "list"]), flags: { style: "word", long: new Set(["v", "n", "run", "count", "race", "cover", "json", "short", "timeout", "tags"]) } }],
   // inspect 移出：容器 JSON 里的 Config.Env 常带 API key
   ["docker", { subcommands: new Set(["ps", "logs", "images"]), flags: { short: "afnqt", long: new Set(["all", "tail", "since", "until", "follow", "timestamps", "format", "filter", "no-trunc", "quiet"]) } }],
+  // node/tsc 借用「子命令」这一层来强制第一个参数：
+  // `node --test` 跑的是仓库自己的测试，与已放行的 `npm test` 同级；
+  // 而 `node -e '…'` / `node script.js` 是直接执行任意代码，必须挡住。
+  ["node", { subcommands: new Set(["--test"]), flags: { long: new Set(["test-reporter", "test-name-pattern", "test-concurrency", "test-only", "experimental-strip-types"]) } }],
+  // tsc 不带 --noEmit 会落地产物，--outDir 更是能写任意目录
+  ["tsc", { subcommands: new Set(["--noemit"]), flags: { long: new Set(["project", "pretty", "incremental"]) } }],
 ]);
 
 /**
@@ -116,7 +149,25 @@ const READ_ONLY_SUBCOMMANDS = new Map<string, SubcommandPolicy>([
  * 会与 shell 实际执行的内容脱节：`'--output=/etc/x'` 带引号时不以 `-`
  * 开头，naive 分词会当成位置参数放过，而 shell 剥掉引号后它仍是标志。
  */
-export function parseCommand(command: string): string[] | undefined {
+/**
+ * 可以按段拆开逐段判定的操作符。它们只决定「下一段跑不跑」，
+ * 不会把数据写到任何地方 —— 每段自己仍要过白名单，`ls | sh` 照样死在 sh 上。
+ *
+ * 重定向（`>` `>>` `<` `2>`）刻意不在此列：它能把任意内容写进任意路径，
+ * 而写入目标是操作数不是命令，逐段判定根本看不见它。
+ */
+const SPLITTABLE_OPS = new Set(["|", "&&", "||", ";"]);
+
+/**
+ * 把命令拆成 shell 实际会执行的若干段 argv。
+ * 返回 undefined 表示「无法安全判定」—— 出现了重定向、后台、子 shell、
+ * 命令替换、变量展开、glob，或解析本身失败。调用方一律按危险处理。
+ *
+ * 用真正的 shell 解析器而不是正则 + split，是因为字符串层面的 token 流
+ * 会与 shell 实际执行的内容脱节：`'--output=/etc/x'` 带引号时不以 `-`
+ * 开头，naive 分词会当成位置参数放过，而 shell 剥掉引号后它仍是标志。
+ */
+export function parseSegments(command: string): string[][] | undefined {
   if (RAW_FORBIDDEN.test(command)) return undefined;
 
   let entries: ReturnType<typeof parse>;
@@ -126,13 +177,20 @@ export function parseCommand(command: string): string[] | undefined {
     return undefined;
   }
 
-  const tokens: string[] = [];
+  const segments: string[][] = [];
+  let current: string[] = [];
   for (const entry of entries) {
     if (typeof entry === "string") {
-      tokens.push(entry);
+      current.push(entry);
       continue;
     }
-    // 操作符（管道、重定向、串联、子 shell），以及 glob。
+    // 可拆分的操作符：收束当前段，开下一段
+    if ("op" in entry && typeof entry.op === "string" && SPLITTABLE_OPS.has(entry.op)) {
+      segments.push(current);
+      current = [];
+      continue;
+    }
+    // 其余操作符（重定向、后台、子 shell），以及 glob。
     //
     // glob 也放弃判定：我们只看得到未展开的模式串，看不到它实际会展开成
     // 哪些 argv。仓库里若存在一个名字像标志的文件（write 工具在仓库内是
@@ -140,7 +198,18 @@ export function parseCommand(command: string): string[] | undefined {
     // 「评估的文本 ≠ 执行的 argv」正是本模块前四版反复栽的地方，不留缺口。
     return undefined;
   }
-  return tokens;
+  segments.push(current);
+
+  // 空段意味着 `ls |`、`| ls`、`ls ;; cat` 这类我们没把握复现的写法，放弃判定
+  if (segments.some((s) => s.length === 0)) return undefined;
+  return segments;
+}
+
+/** 单段命令的 argv；命令含可拆分操作符时返回 undefined */
+export function parseCommand(command: string): string[] | undefined {
+  const segments = parseSegments(command);
+  if (segments === undefined || segments.length !== 1) return undefined;
+  return segments[0];
 }
 
 export function isInside(
@@ -155,8 +224,13 @@ export function isInside(
 }
 
 export function flagsAllowed(tokens: readonly string[], policy: FlagPolicy): boolean {
+  let positionals = 0;
   for (const token of tokens) {
-    if (token === "-" || token === "--" || !token.startsWith("-")) continue;
+    if (token === "-" || token === "--" || !token.startsWith("-")) {
+      positionals += 1;
+      if (policy.maxPositionals !== undefined && positionals > policy.maxPositionals) return false;
+      continue;
+    }
 
     if (token.startsWith("--")) {
       const name = token.slice(2).split("=", 1)[0];
@@ -193,9 +267,13 @@ export function flagsAllowed(tokens: readonly string[], policy: FlagPolicy): boo
 }
 
 export function assessBashRisk(command: string): Risk {
-  const tokens = parseCommand(command);
-  if (tokens === undefined) return "risky";
+  const segments = parseSegments(command);
+  if (segments === undefined) return "risky";
+  // 逐段判定，一段不安全整条就不安全
+  return segments.every((s) => assessSegment(s) === "safe") ? "safe" : "risky";
+}
 
+function assessSegment(tokens: readonly string[]): Risk {
   const head = tokens[0]?.toLowerCase();
   if (head === undefined) return "risky";
 
@@ -209,6 +287,37 @@ export function assessBashRisk(command: string): Risk {
   const policy = READ_ONLY_COMMANDS.get(head);
   if (policy === undefined) return "risky";
   return flagsAllowed(tokens.slice(1), policy) ? "safe" : "risky";
+}
+
+/**
+ * relaxed 档的危险模式。
+ *
+ * 这是一份**黑名单**，与 balanced/strict 的白名单模型相反 —— 枚举危险必然有漏网，
+ * 这正是 relaxed 用便利换来的代价。只在你信任 agent 与仓库环境时启用。
+ * 直接扫原始命令串而不是解析后的 argv：解析失败（重定向、glob、变量展开）
+ * 在本档不再等于危险，但那些写法照样能藏破坏性命令，正则至少还能兜一层。
+ */
+const RELAXED_DANGEROUS: readonly RegExp[] = [
+  // 删除、覆写、改权限、改用户、改系统状态
+  /\b(rm|rmdir|shred|truncate|dd|fdisk|parted|mkfs\S*|mount|umount)\b/,
+  /\b(chmod|chown|chgrp|useradd|userdel|usermod|passwd|visudo)\b/,
+  /\b(sudo|su|doas)\b/,
+  /\b(shutdown|reboot|halt|poweroff|init)\b/,
+  /\b(systemctl|service|iptables|nft|crontab)\b/,
+  /\b(kill|killall|pkill)\b/,
+  // 下载后直接执行
+  /\b(curl|wget)\b[^|]*\|/,
+  // 往仓库外的系统目录写
+  />\s*\/(etc|dev|usr|bin|sbin|boot|lib|var|root)\b/,
+  // 不可逆的对外动作
+  /\bgit\s+push\b/,
+  /\bnpm\s+publish\b/,
+  /\bdocker\s+(rm|rmi|prune)\b/,
+  /\bsystem\s+prune\b/,
+];
+
+export function assessRelaxedBashRisk(command: string): Risk {
+  return RELAXED_DANGEROUS.some((re) => re.test(command)) ? "risky" : "safe";
 }
 
 export interface AssessArgs {
@@ -242,7 +351,7 @@ export function assessRisk({
   if (toolName === "bash") {
     const command = typeof input.command === "string" ? input.command : undefined;
     if (command === undefined) return "risky";
-    return assessBashRisk(command);
+    return mode === "relaxed" ? assessRelaxedBashRisk(command) : assessBashRisk(command);
   }
 
   return "safe";

@@ -14,6 +14,7 @@ import {
 } from "./renderer.ts";
 import type { Config } from "./config.ts";
 import type { InboundMessage } from "./feishu.ts";
+import type { LogFn } from "./log.ts";
 
 export interface GatewayLike {
   boundChatId?: string;
@@ -101,6 +102,11 @@ interface TurnState {
 export class Bridge {
   #turn: TurnState | undefined;
   #toolStartedAt = new Map<string, number>();
+  /**
+   * 操作员点了「本回合全部允许」。只在当前 agent 回合内有效，
+   * startTurn/endTurn 两头都清零 —— 宁可多问一次，也不能让豁免漏到下个回合。
+   */
+  #turnApproved = false;
 
   /** ExtensionAPI 不暴露流式状态，这里自己跟踪 */
   get isStreaming(): boolean {
@@ -110,14 +116,14 @@ export class Bridge {
   // strip-only 模式不支持构造函数参数属性，依赖写成显式字段
   readonly #config: Config;
   readonly #gateway: GatewayLike;
-  readonly #log: (msg: string) => void;
+  readonly #log: LogFn;
   readonly #now: () => number;
   readonly #drainTimeoutMs: number;
 
   constructor(
     config: Config,
     gateway: GatewayLike,
-    log: (msg: string) => void,
+    log: LogFn,
     now: () => number = () => Date.now(),
     drainTimeoutMs: number = STREAM_DRAIN_TIMEOUT_MS,
   ) {
@@ -133,7 +139,7 @@ export class Bridge {
     try {
       fn();
     } catch (err) {
-      this.#log(`出站渲染失败：${String(err)}`);
+      this.#log(`出站渲染失败：${String(err)}`, "warning");
     }
   }
 
@@ -148,6 +154,7 @@ export class Bridge {
 
   startTurn(): void {
     if (this.#turn) return;
+    this.#turnApproved = false;
     const stream = new TurnStream();
     const turn: TurnState = {
       stream,
@@ -161,7 +168,7 @@ export class Bridge {
       .streamTurn(async (sink) => stream.pump(sink))
       .catch((err) => {
         turn.streamFailed = true;
-        this.#log(`飞书流式发送失败，将在回合结束后补发全文：${String(err)}`);
+        this.#log(`飞书流式发送失败，将在回合结束后补发全文：${String(err)}`, "warning");
       });
     this.#turn = turn;
   }
@@ -197,6 +204,7 @@ export class Bridge {
   async endTurn(): Promise<void> {
     const turn = this.#turn;
     if (!turn) return;
+    this.#turnApproved = false;
     this.#push(renderTurnEnd(this.#now() - turn.startedAt, turn.tokens));
     this.#turn = undefined;
     this.#toolStartedAt.clear();
@@ -214,7 +222,7 @@ export class Bridge {
     if (timer !== undefined) clearTimeout(timer);
     if (!drained) {
       turn.streamFailed = true;
-      this.#log(`流式收尾超时（${this.#drainTimeoutMs}ms），改为补发全文`);
+      this.#log(`流式收尾超时（${this.#drainTimeoutMs}ms），改为补发全文`, "warning");
     }
 
     // 流式卡片废了（断线/限流/元素超限/收尾超时）时，把全文作为普通消息补发一次
@@ -222,7 +230,7 @@ export class Bridge {
       try {
         await this.#gateway.sendText(turn.transcript);
       } catch (err) {
-        this.#log(`补发全文也失败了，本回合内容仅存在于终端：${String(err)}`);
+        this.#log(`补发全文也失败了，本回合内容仅存在于终端：${String(err)}`, "error");
       }
     }
   }
@@ -246,10 +254,12 @@ export class Bridge {
         resolvePath: realPathOrSelf,
       });
     } catch (err) {
-      this.#log(`危险判定异常，按危险处理：${String(err)}`);
+      this.#log(`危险判定异常，按危险处理：${String(err)}`, "error");
       risk = "risky";
     }
     if (risk === "safe") return undefined;
+    // 本回合已被整体批准，后续危险调用不再打扰操作员
+    if (this.#turnApproved) return undefined;
 
     const askers: Asker[] = [this.#gateway.cardAsker];
     if (tuiAsker) askers.push(tuiAsker);
@@ -262,9 +272,12 @@ export class Bridge {
         this.#config.approvalTimeoutMs,
       );
     } catch (err) {
-      this.#log(`审批流程异常，按拒绝处理：${String(err)}`);
+      this.#log(`审批流程异常，按拒绝处理：${String(err)}`, "error");
       decision = { allow: false, reason: "审批流程异常" };
     }
+
+    // 只有「批准 + turn」才开启豁免；拒绝带 scope 一律无效
+    if (decision.allow && decision.scope === "turn") this.#turnApproved = true;
 
     if (decision.allow) return undefined;
     this.#push(renderBlocked(toolName, decision.reason));

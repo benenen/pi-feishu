@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export type ApprovalMode = "balanced" | "strict";
+export type ApprovalMode = "balanced" | "strict" | "relaxed";
 
 export interface Config {
   appId: string;
@@ -133,10 +133,14 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
 
   let approvalMode: ApprovalMode = "balanced";
   if (merged.approvalMode !== undefined) {
-    if (merged.approvalMode === "balanced" || merged.approvalMode === "strict") {
+    if (
+      merged.approvalMode === "balanced" ||
+      merged.approvalMode === "strict" ||
+      merged.approvalMode === "relaxed"
+    ) {
       approvalMode = merged.approvalMode;
     } else {
-      problems.push('approvalMode 必须是 "balanced" 或 "strict"');
+      problems.push('approvalMode 必须是 "balanced"、"strict" 或 "relaxed"');
     }
   }
 

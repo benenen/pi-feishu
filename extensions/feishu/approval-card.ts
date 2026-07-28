@@ -46,6 +46,12 @@ export function buildApprovalCard(id: string, req: ApprovalRequest): object {
           },
           {
             tag: "button",
+            text: { tag: "plain_text", content: "本回合全部允许" },
+            type: "default",
+            value: { kind: APPROVAL_KIND, id, allow: true, scope: "turn" },
+          },
+          {
+            tag: "button",
             text: { tag: "plain_text", content: "拒绝" },
             type: "danger",
             value: { kind: APPROVAL_KIND, id, allow: false },
@@ -65,12 +71,14 @@ export function buildSettledCard(status: string): object {
 
 export function parseApprovalAction(
   value: unknown,
-): { id: string; allow: boolean } | undefined {
+): { id: string; allow: boolean; scope?: "turn" } | undefined {
   if (value === null || typeof value !== "object") return undefined;
-  const v = value as { kind?: unknown; id?: unknown; allow?: unknown };
+  const v = value as { kind?: unknown; id?: unknown; allow?: unknown; scope?: unknown };
   if (v.kind !== APPROVAL_KIND || typeof v.id !== "string") return undefined;
   // 只有显式 true 才算批准
-  return { id: v.id, allow: v.allow === true };
+  const allow = v.allow === true;
+  // scope 只认字面量 "turn"，别的值一律当普通批准 —— 卡片 value 是从飞书回来的外部输入
+  return allow && v.scope === "turn" ? { id: v.id, allow, scope: "turn" } : { id: v.id, allow };
 }
 
 /** 显式收件方优先；都没有时返回 undefined，调用方应放弃发送 */
