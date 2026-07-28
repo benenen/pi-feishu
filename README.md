@@ -12,42 +12,74 @@ pi install git:github.com/you/pi-feishu
 ## 配置
 
 配置按 `~/.pi/agent/feishu.json` → `<项目>/.pi/feishu.json` 的顺序合并，后者覆盖前者。
-环境变量只用于凭据两项（`FEISHU_APP_ID` / `FEISHU_APP_SECRET`），且优先级最高；其余键只能写在配置文件里。
+注意是 `~/.pi/**agent**/`，不是 `~/.pi/` —— 放错地方不会报错，只是永远不生效。
 
-配置文件如果存在但 JSON 有语法错，会明确报「不是合法的 JSON」，不会被当成「文件不存在」悄悄跳过。
+凭据两项（`appId` / `appSecret`）可走环境变量 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，
+且**优先级最高**；其余键只能写在配置文件里。
+
+配置文件如果存在但 JSON 有语法错，会明确报「不是合法的 JSON」，不会被当成「文件不存在」
+悄悄跳过 —— 否则你只会看到一句莫名其妙的「缺少 appId」，或者更糟：白名单悄悄退回空数组。
 
 ```json
 {
   "appId": "cli_xxx",
-  "dmAllowlist": ["ou_your_open_id"],
+  "appSecret": "xxx",
+  "bindTarget": "code",
+  "approverAllowlist": ["ou_your_open_id"],
   "approvalMode": "balanced",
   "autoStart": false
 }
 ```
 
-密钥走环境变量：`FEISHU_APP_ID`、`FEISHU_APP_SECRET`。
+一共 16 个键，按用途分四组。
+
+### 凭据
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `appId` / `appSecret` | 必填 | 飞书应用凭据 |
-| `autoStart` | `false` | 会话启动时自动连接。**多开 pi 会抢消息，保持 false 更安全** |
-| `dmMode` | 见右 | `open` 所有人可触达；`allowlist` 只认白名单。**没配任何白名单键时默认 `open`**，配了 `dmAllowlist`/`groupAllowlist` 则自动切 `allowlist` |
-| `dmAllowlist` | `[]` | 允许单聊的 open_id。**open_id 按应用隔离** —— 换了 appId 就得重新取 |
-| `groupAllowlist` | `[]` | 允许的群 chat_id |
-| `approverAllowlist` | 同 `dmAllowlist` | **谁的卡片点击算数**。飞书 SDK 不对卡片回调做白名单过滤，只配 `groupAllowlist` 时必须显式指定，否则群里任何人都能点「允许」 |
-| `requireMention` | `true` | 群聊是否需要 @ 机器人。**群里拉了多个 bot 时必须保持 `true`** —— 设成 `false` 等于不看 @，每条群消息会同时喂给群里所有 bot，多个 agent 一起干活、一起刷屏。只对群生效，私聊不受影响 |
-| `approvalMode` | `"balanced"` | `relaxed` 只拦黑名单里的破坏性命令；`balanced` 只放行只读命令白名单；`strict` 所有 bash/write/edit 都要批。详见下方「审批档位」 |
-| `operatorOpenId` | `approverAllowlist[0]` | `/feishu start` 后主动私信谁并绑定该私聊。填 `ou_` 开头的 open_id |
-| `bindTarget` | `"operator"` | 启动时绑谁：`operator` 私信操作员并绑定该私聊；`code` 终端显示配对码、谁输对谁绑上（**推荐**）；`none` 不主动绑、任意首条消息即绑；`oc_xxx` 直接绑定该群 |
-| `pairingTtlMs` | `600000` | 配对码有效期（毫秒）|
-| `denyPatterns` | `[]` | **仅 relaxed 档**：追加到内置黑名单之上的正则（字符串形式）|
-| `allowPatterns` | `[]` | **仅 relaxed 档**：例外，命中即放行，优先于所有 deny（含内置）|
-| `approvalTimeoutMs` | `120000` | 审批超时，超时即拒绝 |
-| `repoRoot` | 当前 cwd | 判定「写到范围外」的基准 |
+| `appId` | **必填** | 飞书应用 id。也可用环境变量 `FEISHU_APP_ID` |
+| `appSecret` | **必填** | 应用密钥。也可用 `FEISHU_APP_SECRET` |
+
+### 谁能触达机器人
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `dmMode` | 见右 | `open` 所有人可私聊；`allowlist` 只认名单。**一个白名单键都没配时默认 `open`**，配了 `dmAllowlist`/`groupAllowlist` 则自动切 `allowlist`（老配置不会被悄悄放开）|
+| `dmAllowlist` | `[]` | 允许私聊的 open_id（`ou_` 开头）。**open_id 按应用隔离** —— 换了 appId 就得重新取 |
+| `groupAllowlist` | `[]` | 允许的群 chat_id（`oc_` 开头）。**空数组表示「不限」，不是「全部禁止」** |
+| `requireMention` | `true` | 群里是否必须 @ 机器人。**群里拉了多个 bot 时必须保持 `true`** —— 设成 `false` 等于不看 @，每条群消息会同时喂给群里所有 bot，多个 agent 一起干活、一起刷屏。只对群生效，私聊不受影响 |
 
 `dmMode` 为 `allowlist` 时，`dmAllowlist` 和 `groupAllowlist` 不能同时为空。
-`approverAllowlist` 解析后**任何档位下都不能为空** —— 卡片点击不经飞书的策略管道，
-`dmMode: open` 时它是唯一挡住「谁都能批准自己」的东西，必须显式指定。
+
+### 绑定哪个会话
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `bindTarget` | `"operator"` | `operator` 私信操作员并绑定该私聊；`code` 终端显示配对码、谁输对谁绑上（**推荐**，见下方「配对码绑定」）；`none` 不主动绑、任意首条消息即绑；`oc_xxx` 直接绑定该群 |
+| `operatorOpenId` | `approverAllowlist[0]` | `operator` 档主动私信谁。填 `ou_` 开头的 open_id |
+| `pairingTtlMs` | `600000` | 配对码有效期（毫秒）。仅 `code` 档用 |
+
+一个 pi 会话同时只认一个会话 id。绑了私聊之后群里 @ 它只会收到「该 pi 会话已绑定到其他对话」。
+
+### 审批闸门
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `approvalMode` | `"balanced"` | `strict` 除 read/grep/find/ls 外全批；`balanced` 只放行只读命令白名单；`relaxed` 只拦黑名单。详见「审批档位」 |
+| `approverAllowlist` | 同 `dmAllowlist` | **谁点卡片的「允许」算数**。飞书 SDK 不对卡片回调做白名单过滤，**任何档位下解析后都不能为空** —— `dmMode: open` 时它是唯一挡住「谁都能批准自己」的东西 |
+| `denyPatterns` | `[]` | **仅 relaxed 档**：追加到内置黑名单之上的正则（字符串形式，JSON 里反斜杠写两遍）|
+| `allowPatterns` | `[]` | **仅 relaxed 档**：例外，命中即放行，**优先于所有 deny（含内置）** |
+| `approvalTimeoutMs` | `120000` | 审批超时，超时即拒绝 |
+
+`denyPatterns` / `allowPatterns` 里的正则在 `/feishu start` 时就编译校验，写错会当场报错 ——
+而不是等某条命令恰好走到判定时才炸（那时 fail-closed 会把一切判危险，根因极难定位）。
+
+### 其他
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `autoStart` | `false` | 会话启动时自动连接。**多开 pi 会抢消息** —— 同一个 appId 只有一条长连接，飞书把事件推给哪一条不确定，保持 `false` 更安全 |
+| `repoRoot` | 当前 cwd | 判定「写到范围外」的基准 |
 
 ## 审批档位
 
