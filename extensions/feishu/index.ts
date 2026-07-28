@@ -254,7 +254,11 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     if (!bridge) return undefined;
 
-    const tuiAsker: Asker | undefined = ctx.hasUI
+    // RPC 模式下 ctx.hasUI 也是 true（dialog 方法走 extension UI 子协议），
+    // 但 ctx.ui.confirm() 会阻塞等待 stdin 的 extension_ui_response，
+    // 无客户端配合就会卡死。飞书卡片审批走独立 WebSocket，与 pi 模式无关，
+    // 所以 RPC/headless 下只用飞书卡片审批即可。
+    const tuiAsker: Asker | undefined = ctx.mode === "tui"
       ? async (req, signal) => {
           const ok = await ctx.ui.confirm(
             `⚠️ 需要审批：${req.toolName}`,
