@@ -87,6 +87,7 @@ export default function (pi: ExtensionAPI) {
             await gw.sendText("该 pi 会话已绑定到其他对话。", msg.chatId);
             return;
           }
+          log(`收到消息：chatId=${msg.chatId} senderId=${msg.senderId}`);
           if (gw.boundChatId === undefined) gw.bind(msg.chatId);
 
           const control = parseControlCommand(msg.text);

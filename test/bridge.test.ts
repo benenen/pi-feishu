@@ -85,6 +85,7 @@ const CONFIG = {
   appId: "a",
   appSecret: "b",
   autoStart: false,
+  dmMode: "allowlist" as const,
   dmAllowlist: ["ou_1"],
   groupAllowlist: [],
   approverAllowlist: ["ou_1"],

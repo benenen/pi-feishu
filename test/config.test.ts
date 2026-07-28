@@ -60,11 +60,15 @@ test("缺少凭据时一次报出全部问题", () => {
   assert.ok(err.problems.some((p) => p.includes("appSecret")));
 });
 
-test("两个白名单都为空时拒绝启动", () => {
+test("allowlist 档下两个白名单都为空时拒绝启动", () => {
   const err = throwsConfigError(() =>
-    loadConfig({ files: [{ appId: "a", appSecret: "b" }], env: {}, cwd: "/w" }),
+    loadConfig({
+      files: [{ appId: "a", appSecret: "b", dmMode: "allowlist" }],
+      env: {},
+      cwd: "/w",
+    }),
   );
-  assert.ok(err.problems.some((p) => p.includes("不能同时为空")));
+  assert.ok(err.problems.some((p) => p.includes("均为空")));
 });
 
 test("非法的 approvalMode 和 approvalTimeoutMs 都被拒绝", () => {
@@ -166,4 +170,58 @@ test("approvalMode 仍然拒绝乱填的值", () => {
     loadConfig({ files: [{ ...base, approvalMode: "yolo" }], env: {}, cwd: "/w" }),
   );
   assert.ok(e.problems.some((p) => p.includes("approvalMode")));
+});
+
+test("配了白名单键但没写 dmMode，自动切到 allowlist —— 老配置不会被悄悄放开", () => {
+  assert.equal(loadConfig({ files: [base], env: {}, cwd: "/w" }).dmMode, "allowlist");
+});
+
+test("一个白名单键都没配时 dmMode 默认 open", () => {
+  const c = loadConfig({
+    files: [{ appId: "a", appSecret: "b", approverAllowlist: ["ou_me"] }],
+    env: {},
+    cwd: "/w",
+  });
+  assert.equal(c.dmMode, "open");
+});
+
+test("dmMode 接受 open / allowlist", () => {
+  for (const m of ["open", "allowlist"] as const) {
+    assert.equal(loadConfig({ files: [{ ...base, dmMode: m }], env: {}, cwd: "/w" }).dmMode, m);
+  }
+});
+
+test("dmMode 拒绝乱填的值", () => {
+  const e = throwsConfigError(() =>
+    loadConfig({ files: [{ ...base, dmMode: "everyone" }], env: {}, cwd: "/w" }),
+  );
+  assert.ok(e.problems.some((p) => p.includes("dmMode")));
+});
+
+test("dmMode=open 时两个白名单都为空是合法的 —— 本来就不靠白名单放行", () => {
+  const c = loadConfig({
+    files: [
+      {
+        appId: "cli_x",
+        appSecret: "sec",
+        dmMode: "open",
+        approverAllowlist: ["ou_me"],
+      },
+    ],
+    env: {},
+    cwd: "/w",
+  });
+  assert.equal(c.dmMode, "open");
+  assert.deepEqual(c.dmAllowlist, []);
+});
+
+test("dmMode=open 也必须显式指定 approverAllowlist —— 否则谁都能批准自己", () => {
+  const e = throwsConfigError(() =>
+    loadConfig({
+      files: [{ appId: "cli_x", appSecret: "sec", dmMode: "open" }],
+      env: {},
+      cwd: "/w",
+    }),
+  );
+  assert.ok(e.problems.some((p) => p.includes("approverAllowlist")));
 });

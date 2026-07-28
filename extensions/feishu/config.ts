@@ -3,10 +3,17 @@ import path from "node:path";
 
 export type ApprovalMode = "balanced" | "strict" | "relaxed";
 
+/**
+ * open：所有人都能私聊和群聊里触达机器人
+ * allowlist：只允许名单内的用户/群
+ */
+export type DmMode = "open" | "allowlist";
+
 export interface Config {
   appId: string;
   appSecret: string;
   autoStart: boolean;
+  dmMode: DmMode;
   dmAllowlist: string[];
   groupAllowlist: string[];
   /** 谁的卡片点击算数。飞书 SDK 不对 card.action.trigger 做任何白名单过滤 */
@@ -115,10 +122,23 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
   const autoStart = readBoolean(merged.autoStart, "autoStart", false, problems);
   const requireMention = readBoolean(merged.requireMention, "requireMention", true, problems);
 
+  let dmMode: DmMode = "open";
+  if (merged.dmMode !== undefined) {
+    if (merged.dmMode === "open" || merged.dmMode === "allowlist") {
+      dmMode = merged.dmMode;
+    } else {
+      problems.push('dmMode 必须是 "open" 或 "allowlist"');
+      dmMode = "open";
+    }
+  } else if (merged.dmAllowlist !== undefined || merged.groupAllowlist !== undefined) {
+    // 用户显式配了白名单但没写 dmMode：自动切换到 allowlist 模式
+    dmMode = "allowlist";
+  }
+
   const dmAllowlist = readStringArray(merged.dmAllowlist, "dmAllowlist", problems) ?? [];
   const groupAllowlist = readStringArray(merged.groupAllowlist, "groupAllowlist", problems) ?? [];
-  if (dmAllowlist.length === 0 && groupAllowlist.length === 0) {
-    problems.push("dmAllowlist 和 groupAllowlist 不能同时为空，否则没人能触达机器人");
+  if (dmMode === "allowlist" && dmAllowlist.length === 0 && groupAllowlist.length === 0) {
+    problems.push("dmMode 为 allowlist 但 dmAllowlist 和 groupAllowlist 均为空，没有人能触达机器人");
   }
 
   // 卡片点击不经飞书 SDK 的策略管道，必须自己鉴权。默认沿用 dmAllowlist；
@@ -159,6 +179,7 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
     appId: appId as string,
     appSecret: appSecret as string,
     autoStart,
+    dmMode,
     dmAllowlist,
     groupAllowlist,
     approverAllowlist,

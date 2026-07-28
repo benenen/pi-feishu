@@ -60,7 +60,7 @@ export class FeishuGateway {
       transport: "websocket",
       source: "pi-feishu",
       policy: {
-        dmMode: "allowlist",
+        dmMode: this.#config.dmMode,
         dmAllowlist: this.#config.dmAllowlist,
         groupAllowlist: this.#config.groupAllowlist,
         requireMention: this.#config.requireMention,

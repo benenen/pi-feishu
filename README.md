@@ -31,7 +31,8 @@ pi install git:github.com/you/pi-feishu
 |---|---|---|
 | `appId` / `appSecret` | 必填 | 飞书应用凭据 |
 | `autoStart` | `false` | 会话启动时自动连接。**多开 pi 会抢消息，保持 false 更安全** |
-| `dmAllowlist` | `[]` | 允许单聊的 open_id |
+| `dmMode` | 见右 | `open` 所有人可触达；`allowlist` 只认白名单。**没配任何白名单键时默认 `open`**，配了 `dmAllowlist`/`groupAllowlist` 则自动切 `allowlist` |
+| `dmAllowlist` | `[]` | 允许单聊的 open_id。**open_id 按应用隔离** —— 换了 appId 就得重新取 |
 | `groupAllowlist` | `[]` | 允许的群 chat_id |
 | `approverAllowlist` | 同 `dmAllowlist` | **谁的卡片点击算数**。飞书 SDK 不对卡片回调做白名单过滤，只配 `groupAllowlist` 时必须显式指定，否则群里任何人都能点「允许」 |
 | `requireMention` | `true` | 群聊是否需要 @ 机器人 |
@@ -39,7 +40,9 @@ pi install git:github.com/you/pi-feishu
 | `approvalTimeoutMs` | `120000` | 审批超时，超时即拒绝 |
 | `repoRoot` | 当前 cwd | 判定「写到范围外」的基准 |
 
-`dmAllowlist` 和 `groupAllowlist` 不能同时为空；`approverAllowlist` 解析后也不能为空。
+`dmMode` 为 `allowlist` 时，`dmAllowlist` 和 `groupAllowlist` 不能同时为空。
+`approverAllowlist` 解析后**任何档位下都不能为空** —— 卡片点击不经飞书的策略管道，
+`dmMode: open` 时它是唯一挡住「谁都能批准自己」的东西，必须显式指定。
 
 ## 审批档位
 
