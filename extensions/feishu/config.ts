@@ -24,9 +24,12 @@ export interface Config {
    * start 后绑定谁：
    *   "operator" —— 私信 operatorOpenId 并绑定该私聊（默认）
    *   "none"     —— 不主动绑，等第一条入站消息（群里 @ 要用这个或直接填群 id）
+   *   "code"     —— 终端显示一个配对码，谁在飞书里输入它就绑谁
    *   "oc_xxx"   —— 直接绑定该会话（群）
    */
   bindTarget: string;
+  /** 配对码有效期。过期即作废，需要重新 /feishu start 或 /feishu pair 签发 */
+  pairingTtlMs: number;
   requireMention: boolean;
   approvalMode: ApprovalMode;
   /** relaxed 档追加的危险模式（正则源串），加载时已校验可编译 */
@@ -177,10 +180,13 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
   let bindTarget = "operator";
   if (merged.bindTarget !== undefined) {
     const t = merged.bindTarget;
-    if (typeof t === "string" && (t === "operator" || t === "none" || t.startsWith("oc_"))) {
+    if (
+      typeof t === "string" &&
+      (t === "operator" || t === "none" || t === "code" || t.startsWith("oc_"))
+    ) {
       bindTarget = t;
     } else {
-      problems.push('bindTarget 必须是 "operator"、"none" 或以 oc_ 开头的会话 id');
+      problems.push('bindTarget 必须是 "operator"、"none"、"code" 或以 oc_ 开头的会话 id');
     }
   }
 
@@ -215,6 +221,13 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
   const denyPatterns = readPatterns(merged.denyPatterns, "denyPatterns");
   const allowPatterns = readPatterns(merged.allowPatterns, "allowPatterns");
 
+  let pairingTtlMs = 600_000;
+  if (merged.pairingTtlMs !== undefined) {
+    const n = merged.pairingTtlMs;
+    if (typeof n === "number" && Number.isInteger(n) && n > 0) pairingTtlMs = n;
+    else problems.push("pairingTtlMs 必须是正整数（毫秒）");
+  }
+
   let approvalTimeoutMs = 120_000;
   if (merged.approvalTimeoutMs !== undefined) {
     const n = merged.approvalTimeoutMs;
@@ -236,6 +249,7 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
     approverAllowlist,
     operatorOpenId,
     bindTarget,
+    pairingTtlMs,
     requireMention,
     approvalMode,
     denyPatterns,

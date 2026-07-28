@@ -93,6 +93,7 @@ const CONFIG = {
   approverAllowlist: ["ou_1"],
   operatorOpenId: "ou_1",
   bindTarget: "operator",
+  pairingTtlMs: 600_000,
   requireMention: true,
   approvalMode: "balanced" as const,
   denyPatterns: [],

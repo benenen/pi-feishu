@@ -1,4 +1,5 @@
 import path from "node:path";
+import { randomInt } from "node:crypto";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ConfigError, loadConfig, readConfigFile, type Config } from "./config.ts";
@@ -13,6 +14,7 @@ import {
   shouldAccept,
 } from "./bridge.ts";
 import { renderStatus } from "./renderer.ts";
+import { createPairing, type Pairing } from "./pairing.ts";
 import type { Asker } from "./approval.ts";
 
 /** 会话切换时等待断开的上限，防止飞书 API 挂住把 /new 一起冻住 */
@@ -52,6 +54,17 @@ export default function (pi: ExtensionAPI) {
   // 每个 handler 都带 ctx，这里只在生命周期入口刷新就够了
   let ctxRef: ExtensionContext | undefined;
   const log = createLogger(() => ctxRef);
+  let pairing: Pairing | undefined;
+
+  /** 签发配对码并只在终端显示 —— 发进飞书就等于把门钥匙挂门上了 */
+  function issuePairingCode(notify: (msg: string) => void): void {
+    if (!pairing) return;
+    const code = pairing.issue();
+    const minutes = Math.round((config?.pairingTtlMs ?? 600_000) / 60_000);
+    notify(
+      `飞书桥接已启动，等待配对。\n在要绑定的飞书对话里发送这串配对码（${minutes} 分钟内有效）：\n\n    ${code}\n`,
+    );
+  }
 
   // gateway 只在 connect() 返回后才赋值，光靠它挡不住在途的第二次 start：
   // autoStart 撞上手动 /feishu start，会建出两条 WS 连接抢同一批消息 ——
@@ -90,6 +103,20 @@ export default function (pi: ExtensionAPI) {
     gw.onMessage((msg) => {
       void (async () => {
         try {
+          // 待配对时，未绑定状态下只认配对码 —— 任何其他消息都不该绑上来，
+          // 否则「先握手再绑定」就形同虚设
+          if (gw.boundChatId === undefined && pairing?.pending === true) {
+            if (pairing.match(msg.text)) {
+              gw.bind(msg.chatId);
+              log(`配对成功，已绑定 ${msg.chatId}`);
+              await gw.sendText("配对成功，本对话已绑定该 pi 会话。", msg.chatId);
+            } else {
+              // 不回显配对码，只提示需要配对
+              await gw.sendText("该 pi 会话尚未配对，请发送终端上显示的配对码。", msg.chatId);
+            }
+            return;
+          }
+
           if (!shouldAccept(gw, msg.chatId)) {
             // 必须显式指定收件会话，否则会发到已绑定的那个会话去
             await gw.sendText("该 pi 会话已绑定到其他对话。", msg.chatId);
@@ -142,10 +169,18 @@ export default function (pi: ExtensionAPI) {
     } else if (cfg.bindTarget.startsWith("oc_")) {
       if (await bindToChat(gw, cfg.bindTarget, greeting, log)) boundTo = cfg.bindTarget;
     }
-    // "none"：什么都不做，群里 @ 或私聊第一条消息来绑定
-    notify(
-      boundTo ? `飞书桥接已启动，已绑定 ${boundTo}` : "飞书桥接已启动，等待消息绑定会话",
-    );
+
+    if (boundTo) {
+      notify(`飞书桥接已启动，已绑定 ${boundTo}`);
+      return;
+    }
+    // 没绑上：code 档签发配对码，其余仍是「第一条消息绑定」
+    if (cfg.bindTarget === "code") {
+      pairing = createPairing(cfg.pairingTtlMs, randomInt);
+      issuePairingCode(notify);
+      return;
+    }
+    notify("飞书桥接已启动，等待消息绑定会话");
   }
 
   /** 终端与飞书两侧共用同一份状态文案，避免两边说法不一致 */
@@ -155,6 +190,7 @@ export default function (pi: ExtensionAPI) {
       config,
       boundChatId: gateway?.boundChatId,
       boundChatName: await gateway?.describeBoundChat(),
+      pairingPending: pairing?.pending,
       streaming: bridge?.isStreaming,
       turnApproved: bridge?.turnApproved,
     });
@@ -170,26 +206,40 @@ export default function (pi: ExtensionAPI) {
     }
     // 先回执再断开：飞书侧的 notify 走的正是 gw.sendText，
     // disconnect 会把 channel 清掉，之后再发就是静默丢弃
+    pairing?.cancel();
+    pairing = undefined;
     notify("飞书桥接已停止");
     await gw.disconnect();
   }
 
   pi.registerCommand("feishu", {
-    description: "控制飞书桥接：start / stop / status / unbind",
+    description: "控制飞书桥接：start / stop / status / pair / unbind",
     handler: async (args, ctx) => {
       ctxRef = ctx;
       const notify = (msg: string) => ctx.ui.notify(msg, "info");
       const sub = args.trim() || "status";
       if (sub === "start") await start(ctx.cwd, notify);
       else if (sub === "stop") await stop(notify);
+      else if (sub === "pair") {
+        if (!gateway) notify("飞书桥接未在运行");
+        else if (gateway.boundChatId !== undefined) {
+          notify("已绑定会话。要换绑请先 /feishu unbind");
+        } else {
+          pairing ??= createPairing(config?.pairingTtlMs ?? 600_000, randomInt);
+          issuePairingCode(notify);
+        }
+      }
       else if (sub === "unbind") {
         if (!gateway) notify("飞书桥接未在运行");
         else {
           gateway.unbind();
-          notify("已解绑，下一条消息会重新绑定会话");
+          if (config?.bindTarget === "code") {
+            pairing ??= createPairing(config.pairingTtlMs, randomInt);
+            issuePairingCode(notify);
+          } else notify("已解绑，下一条消息会重新绑定会话");
         }
       }
-      else if (sub === "status") notify(await statusText()); else notify(`未知子命令：${sub}。可用：start / stop / status / unbind`);
+      else if (sub === "status") notify(await statusText()); else notify(`未知子命令：${sub}。可用：start / stop / status / pair / unbind`);
     },
   });
 

@@ -90,6 +90,8 @@ export interface StatusInfo {
   boundChatId?: string;
   /** 绑定会话的名称，查不到时省略 —— 不能因为查不到就不显示 id */
   boundChatName?: string;
+  /** 是否正在等待配对码。刻意不接收码本身 —— 这段文字会发进飞书 */
+  pairingPending?: boolean;
   streaming?: boolean;
   /** 操作员是否点过「本回合全部允许」 */
   turnApproved?: boolean;
@@ -118,7 +120,9 @@ export function renderStatus(info: StatusInfo): string {
   const bound =
     info.boundChatId !== undefined
       ? `${named}（${bindWay}）`
-      : `尚未绑定，下一条通过策略的消息会绑定它（${bindWay}）`;
+      : info.pairingPending
+        ? "等待配对 —— 在要绑定的对话里发送终端上显示的配对码"
+        : `尚未绑定，下一条通过策略的消息会绑定它（${bindWay}）`;
 
   const dm =
     c.dmMode === "open" ? "所有人可私聊" : `仅白名单 ${c.dmAllowlist.length} 人`;

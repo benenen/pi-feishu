@@ -38,7 +38,8 @@ pi install git:github.com/you/pi-feishu
 | `requireMention` | `true` | 群聊是否需要 @ 机器人。**群里拉了多个 bot 时必须保持 `true`** —— 设成 `false` 等于不看 @，每条群消息会同时喂给群里所有 bot，多个 agent 一起干活、一起刷屏。只对群生效，私聊不受影响 |
 | `approvalMode` | `"balanced"` | `relaxed` 只拦黑名单里的破坏性命令；`balanced` 只放行只读命令白名单；`strict` 所有 bash/write/edit 都要批。详见下方「审批档位」 |
 | `operatorOpenId` | `approverAllowlist[0]` | `/feishu start` 后主动私信谁并绑定该私聊。填 `ou_` 开头的 open_id |
-| `bindTarget` | `"operator"` | 启动时绑谁：`operator` 私信操作员并绑定该私聊；`none` 不主动绑、等首条消息（群里 @ 用这个）；`oc_xxx` 直接绑定该群 |
+| `bindTarget` | `"operator"` | 启动时绑谁：`operator` 私信操作员并绑定该私聊；`code` 终端显示配对码、谁输对谁绑上（**推荐**）；`none` 不主动绑、任意首条消息即绑；`oc_xxx` 直接绑定该群 |
+| `pairingTtlMs` | `600000` | 配对码有效期（毫秒）|
 | `denyPatterns` | `[]` | **仅 relaxed 档**：追加到内置黑名单之上的正则（字符串形式）|
 | `allowPatterns` | `[]` | **仅 relaxed 档**：例外，命中即放行，优先于所有 deny（含内置）|
 | `approvalTimeoutMs` | `120000` | 审批超时，超时即拒绝 |
@@ -121,6 +122,31 @@ TOKEN=$(curl -s -X POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_t
 curl -s -H "Authorization: Bearer $TOKEN" \
   'https://open.feishu.cn/open-apis/contact/v3/scopes?user_id_type=open_id' | jq .data.user_ids
 ```
+
+## 配对码绑定（`bindTarget: "code"`）
+
+`none` 档下**任意一条入站消息都会绑定该会话** —— 谁先说话谁就拿到这个 pi 会话的
+指令权。配对码把它换成一次显式握手：
+
+1. `/feishu start` 后终端打印一串 8 位配对码
+2. 你在**想绑定的那个**飞书对话（私聊或群）里把码发出去
+3. 机器人回「配对成功」，该对话即绑定
+
+```
+/feishu pair      未绑定时重新签发一个配对码
+/feishu unbind    解绑；code 档下会自动签发新码
+```
+
+几条性质是刻意的：
+
+- **码只在终端显示，绝不发进飞书** —— 发出去就等于把钥匙挂门上
+- **一次性**：用掉即失效，防止同一个码被重放绑到第二个会话
+- **有时效**（默认 10 分钟）：终端上残留的旧码不该永远可用
+- **重新签发即作废旧码**：否则 unbind 之后旧码还能绑回来
+- 待配对期间，非配对码的消息只会收到「请发送配对码」，**不会**绑定
+- 字母表剔除了 `0/O/1/I/l`，手机上不会输错
+
+配对码是道安全边界：拿到它的人就能给你的 agent 下指令。别把它贴到群里。
 
 ## 飞书应用配置
 

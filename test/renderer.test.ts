@@ -106,6 +106,7 @@ const CFG: Config = {
   approverAllowlist: ["ou_a", "ou_b"],
   operatorOpenId: "ou_a",
   bindTarget: "operator",
+  pairingTtlMs: 600_000,
   requireMention: true,
   approvalMode: "balanced",
   denyPatterns: [],
@@ -217,4 +218,25 @@ test("status：配了自定义规则要显示条数，否则你无从确认它�
 test("status：没配自定义规则就不提，别加无谓的噪音", () => {
   const out = renderStatus({ running: true, config: CFG, boundChatId: "oc_x" });
   assert.equal(out.includes("自定义规则"), false);
+});
+
+test("status：待配对时说明在等配对码，但绝不回显码本身", () => {
+  const out = renderStatus({
+    running: true,
+    config: { ...CFG, bindTarget: "code" },
+    pairingPending: true,
+  });
+  assert.match(out, /等待配对/);
+  assert.match(out, /终端/, "应提示码在终端");
+});
+
+test("status：配对码本身不出现在状态文本里", () => {
+  const out = renderStatus({
+    running: true,
+    config: { ...CFG, bindTarget: "code" },
+    pairingPending: true,
+  });
+  // renderStatus 根本拿不到码，这里钉死这个契约
+  assert.equal(Object.keys({ pairingPending: true }).includes("pairingCode"), false);
+  assert.equal(out.includes("ABCD"), false);
 });

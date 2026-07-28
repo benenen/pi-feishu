@@ -305,3 +305,25 @@ test("denyPatterns 必须是字符串数组", () => {
   );
   assert.ok(e.problems.some((p) => p.includes("denyPatterns")));
 });
+
+test("bindTarget 接受 code", () => {
+  assert.equal(
+    loadConfig({ files: [{ ...base, bindTarget: "code" }], env: {}, cwd: "/w" }).bindTarget,
+    "code",
+  );
+});
+
+test("pairingTtlMs 默认 10 分钟", () => {
+  assert.equal(loadConfig({ files: [base], env: {}, cwd: "/w" }).pairingTtlMs, 600_000);
+});
+
+test("pairingTtlMs 可配，且必须是正整数", () => {
+  assert.equal(
+    loadConfig({ files: [{ ...base, pairingTtlMs: 60_000 }], env: {}, cwd: "/w" }).pairingTtlMs,
+    60_000,
+  );
+  const e = throwsConfigError(() =>
+    loadConfig({ files: [{ ...base, pairingTtlMs: 0 }], env: {}, cwd: "/w" }),
+  );
+  assert.ok(e.problems.some((p) => p.includes("pairingTtlMs")));
+});
