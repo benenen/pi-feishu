@@ -435,3 +435,24 @@ test("cd 放行 —— 无写能力，且 `cd x && 只读命令` 是高频写法
   assert.equal(bash("cd /tmp"), "safe");
   assert.equal(bash("cd a && rm -rf b"), "risky", "串联里的危险段照样拦");
 });
+
+test("relaxed：丢弃输出的 /dev 重定向不该被当成写系统目录", () => {
+  assert.equal(relaxed("echo hi 2>/dev/null"), "safe");
+  assert.equal(relaxed("npm test >/dev/null 2>&1"), "safe");
+  assert.equal(relaxed("mvn -q package &> /dev/null"), "safe");
+  assert.equal(relaxed("cat x > /dev/stdout"), "safe");
+  assert.equal(relaxed("cat x > /dev/fd/2"), "safe");
+  // 实际踩到的那条命令
+  assert.equal(
+    relaxed('echo $VIKUNJA_URL; echo $VIKUNJA_TOKEN | head -c 20; env | grep -i vikunja 2>/dev/null || echo "no vikunja env vars"'),
+    "safe",
+  );
+});
+
+test("relaxed：写真正的设备和系统目录仍然要批", () => {
+  assert.equal(relaxed("cat evil > /dev/sda"), "risky", "写块设备会毁盘");
+  assert.equal(relaxed("echo x > /dev/nvme0n1"), "risky");
+  assert.equal(relaxed("echo x > /etc/cron.d/pwn"), "risky");
+  assert.equal(relaxed("echo x > /usr/bin/ls"), "risky");
+  assert.equal(relaxed("echo x > /root/.ssh/authorized_keys"), "risky");
+});

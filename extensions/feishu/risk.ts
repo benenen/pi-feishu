@@ -308,7 +308,11 @@ const RELAXED_DANGEROUS: readonly RegExp[] = [
   // 下载后直接执行
   /\b(curl|wget)\b[^|]*\|/,
   // 往仓库外的系统目录写
-  />\s*\/(etc|dev|usr|bin|sbin|boot|lib|var|root)\b/,
+  />\s*\/(etc|usr|bin|sbin|boot|lib|var|root)\b/,
+  // /dev 单独处理：`2>/dev/null` 是丢弃输出，不是写系统目录，一刀切会把
+  // 几乎每条带静默重定向的命令都误判成危险。真正要拦的是写块设备（`> /dev/sda`
+  // 直接毁盘），所以放行标准的位桶，其余 /dev 目标照拦。
+  />\s*\/dev\/(?!null\b|zero\b|stdout\b|stderr\b|tty\b|fd\/)/,
   // 不可逆的对外动作
   /\bgit\s+push\b/,
   /\bnpm\s+publish\b/,
