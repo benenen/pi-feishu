@@ -390,8 +390,10 @@ const RELAXED_DANGEROUS: readonly RegExp[] = [
   /\bcrontab\b(?!\s+(-l|--list)\b)/,
   /\bnft\b(?!\s+list\b)/,
   /\b(kill|killall|pkill)\b/,
-  // 下载后直接执行
-  /\b(curl|wget)\b[^|]*\|/,
+  // 下载后直接执行。解析放弃时才会走到这里，精度有限，但至少要求管道另一头
+  // 确实是个能执行的东西 —— 只看「curl 后面有管道」会把 curl|grep 全误伤。
+  // `\|\s*` 锚在管道口，所以 `curl … | grep bash` 里的 bash 不算
+  /\b(curl|wget)\b.*\|\s*(sudo\s+|env\s+)?(sh|bash|zsh|dash|ksh|ash|python3?|perl|ruby|node|php|lua|xargs)\b/,
   // 往仓库外的系统目录写
   />\s*\/(etc|usr|bin|sbin|boot|lib|var|root)\b/,
   // /dev 单独处理：`2>/dev/null` 是丢弃输出，不是写系统目录，一刀切会把
@@ -469,6 +471,24 @@ const DANGEROUS_PAIRS = new Map<string, ReadonlySet<string>>([
 /** 下载后直接执行：这一段是 curl/wget 且被管到下一段 */
 const DOWNLOADERS = new Set(["curl", "wget"]);
 
+/**
+ * 会把标准输入当成「要执行的东西」的命令。
+ *
+ * `curl … | sh` 危险的是**执行**，不是下载。早先的规则只看「curl 后面跟了管道」，
+ * 于是 `curl … | grep`、`… | jq`、`… | head` 这些最常见的排查动作全被判成危险 ——
+ * relaxed 档因此名存实亡。
+ *
+ * 宁可多列几个：列进来只是多问一次审批，漏掉才是真放行。
+ */
+const PIPE_EXECUTORS = new Set([
+  "sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh",
+  "python", "python2", "python3", "perl", "ruby", "node", "nodejs", "php", "lua",
+  // xargs 把标准输入拼成命令行执行，`curl … | xargs rm` 一样是执行下载来的内容
+  "xargs",
+  // 包装器：`curl … | env python`、`curl … | sudo sh`
+  "env", "sudo", "doas", "eval",
+]);
+
 /** 写到这些顶层目录即危险 */
 const SYSTEM_DIRS = new Set(["etc", "usr", "bin", "sbin", "boot", "lib", "var", "root"]);
 
@@ -488,8 +508,19 @@ function riskyRedirectTarget(target: string): boolean {
  * 结构化判定：问的是「这个 token 是不是命令名」「这个路径是不是重定向目标」，
  * 而不是「这坨文本里有没有出现 rm」。后者会把 `grep rm notes.txt` 判危险。
  */
+/** 从第 i 段起顺着 `|` 往后走，看有没有哪一段会把标准输入当命令执行 */
+function pipedIntoExecutor(segments: readonly ShellSegment[], i: number): boolean {
+  for (let j = i; segments[j]?.nextOp === "|"; j += 1) {
+    const next = segments[j + 1];
+    if (!next) return false;
+    if (PIPE_EXECUTORS.has(path.basename(next.argv[0] ?? "").toLowerCase())) return true;
+  }
+  return false;
+}
+
 function relaxedStructuralRisk(segments: readonly ShellSegment[]): Risk {
-  for (const seg of segments) {
+  for (let i = 0; i < segments.length; i += 1) {
+    const seg = segments[i];
     // 按 basename 取命令名，`/bin/rm` 骗不过去
     const head = path.basename(seg.argv[0] ?? "").toLowerCase();
     const rest = seg.argv.slice(1);
@@ -503,7 +534,11 @@ function relaxedStructuralRisk(segments: readonly ShellSegment[]): Risk {
     if (pair && rest[0] !== undefined && pair.has(rest[0])) return "risky";
     if (head === "docker" && rest[0] === "system" && rest[1] === "prune") return "risky";
 
-    if (DOWNLOADERS.has(head) && seg.nextOp === "|") return "risky";
+    // 下载**并执行**才危险。只看「后面有管道」会把 curl|grep 这类排查动作全误伤，
+    // 所以顺着管道往后找，看有没有哪一段会把内容当命令跑
+    if (DOWNLOADERS.has(head) && seg.nextOp === "|" && pipedIntoExecutor(segments, i)) {
+      return "risky";
+    }
 
     if (seg.redirects.some((r) => riskyRedirectTarget(r.target))) return "risky";
   }

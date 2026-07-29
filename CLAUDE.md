@@ -136,9 +136,17 @@ handler 的 catch 吞掉，**消息就没了**。
 ### 卡片点击必须自己鉴权
 
 飞书 SDK 只对 `im.message.receive_v1` 走完整的策略管道；`card.action.trigger`
-**只有去重和串行化，没有任何白名单过滤**。所以 `feishu.ts` 的 cardAction handler
-自己校验 `evt.chatId === bound` 且 `operator.openId ∈ approverAllowlist` ——
-否则群里任何看得见卡片的人都能点「允许」，让 agent 干活的人自己批准自己。
+**只有去重和串行化，没有任何白名单过滤**。所以 cardAction handler 自己校验，
+三层，缺一不可：
+
+1. `operator.openId ∈ approverAllowlist` —— 防「群里任何看得见卡片的人都能点允许」，
+   任何档位下都不能少
+2. **逐卡的会话绑定**：卡片发往哪个对话，就只认那个对话里的点击。由 registry 在
+   `settle` 那层强制，任何调用方绕不过去
+3. `requireBoundChat`（点击必须来自**当前**绑定会话）—— **只在单会话档开**。
+   multiChat 下卡片是故意发到触发这轮的那个对话的（可能是群），而 bound 还留在
+   私聊，开着它群里的卡片谁都点不动，审批直接死锁到超时。它也是三层里最弱的一层：
+   第 2 层比它更准。
 
 ### strip-only 模式的语法限制
 

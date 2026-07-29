@@ -85,13 +85,21 @@ export class FeishuGateway implements GatewayLike {
 
     // 解析 / 鉴权 / 兑现全在 approval-card.ts 的 handleCardAction 里，
     // 与 broker 档共用同一份实现 —— 这段安全代码曾经是两份副本并且漂过一次。
-    // direct 档额外要求点击来自**当前**绑定的会话（requireBoundChat）。
+    //
+    // requireBoundChat 只在单会话档开：multiChat 下卡片本来就是故意发到触发
+    // 这轮的那个对话（可能是群），而 bound 还留在私聊 —— 要求「必须来自已绑定
+    // 会话」的话，群里那张卡片谁都点不动，审批直接死锁到超时。
+    //
+    // 关掉它不等于放开鉴权，另两层都在，而且都比它更严：
+    //   - approverAllowlist：防「群里随便谁点允许」，这层一步不能少
+    //   - 逐卡的会话绑定：卡片发往哪个对话，就只认那个对话里的点击（registry
+    //     在 settle 那层强制，任何调用方绕不过去）—— 比「必须是当前绑定会话」更准
     channel.on("cardAction", (evt) => {
       const settlement = handleCardAction({
         registry: this.#approvals,
         event: evt,
         approverAllowlist: this.#config.approverAllowlist,
-        requireBoundChat: true,
+        requireBoundChat: !this.#config.multiChat,
         boundChatId: this.#bound,
         log: this.#log,
       });

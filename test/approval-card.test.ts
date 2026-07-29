@@ -476,3 +476,52 @@ test("askViaCard：登记时记下收件会话，别的会话点不动这张卡�
   assert.deepEqual(rightChat, { messageId: "om_1", status: "已批准" });
   assert.equal((await decision).allow, true);
 });
+
+test("卡片鉴权：multiChat 下不要求点击来自已绑定会话", async () => {
+  // 卡片本来就是故意发到触发这轮的那个对话（群），而 bound 还是私聊。
+  // 要求「必须来自已绑定会话」的话，群里那张卡片谁都点不动
+  const reg = new ApprovalRegistry();
+  const pending = reg.register("ap-1", "om_1", "oc_群");
+  const out = handleCardAction({
+    registry: reg,
+    event: click("oc_群", "ou_审批人", ALLOW_VALUE),
+    approverAllowlist: ["ou_审批人"],
+    requireBoundChat: false,
+    boundChatId: "oc_私聊",
+    log: () => {},
+  });
+  assert.deepEqual(out, { messageId: "om_1", status: "已批准" });
+  assert.deepEqual(await pending, { allow: true, reason: "飞书批准" });
+});
+
+test("卡片鉴权：multiChat 下「谁能批准」这层一步不能少", () => {
+  // 放开的只是会话归属，审批人白名单是防「群里随便谁点允许」的那道，必须还在
+  const reg = new ApprovalRegistry();
+  reg.register("ap-1", "om_1", "oc_群");
+  const logs: string[] = [];
+  const out = handleCardAction({
+    registry: reg,
+    event: click("oc_群", "ou_路人", ALLOW_VALUE),
+    approverAllowlist: ["ou_审批人"],
+    requireBoundChat: false,
+    log: (m) => logs.push(m),
+  });
+  assert.equal(out, undefined, "群里任何人都能批准自己让 agent 干的活");
+  assert.equal(reg.size, 1);
+  assert.ok(logs.some((l) => l.includes("ou_路人")));
+});
+
+test("卡片鉴权：multiChat 下仍然只认卡片自己那个对话", () => {
+  // 逐卡的会话绑定比「必须是已绑定会话」更严，去掉后者不等于这层也没了
+  const reg = new ApprovalRegistry();
+  reg.register("ap-1", "om_1", "oc_群A");
+  const out = handleCardAction({
+    registry: reg,
+    event: click("oc_群B", "ou_审批人", ALLOW_VALUE),
+    approverAllowlist: ["ou_审批人"],
+    requireBoundChat: false,
+    log: () => {},
+  });
+  assert.equal(out, undefined);
+  assert.equal(reg.size, 1);
+});
