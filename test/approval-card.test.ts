@@ -525,3 +525,18 @@ test("卡片鉴权：multiChat 下仍然只认卡片自己那个对话", () => {
   assert.equal(out, undefined);
   assert.equal(reg.size, 1);
 });
+
+test("审批卡片必须是共享卡片，否则点完没法收到终态", () => {
+  // im.v1.message.patch（updateCard 走的就是它）只能更新 update_multi: true 的
+  // 共享卡片。默认的独享卡片每人一份副本，patch 改不动 —— 表现就是点了「允许」
+  // 之后 pi 照常放行，但卡片上的按钮一直杵在那儿，看不出批没批过
+  const card = buildApprovalCard("ap-1", { toolName: "bash", input: { command: "ls" } }) as {
+    config?: { update_multi?: boolean };
+  };
+  assert.equal(card.config?.update_multi, true);
+});
+
+test("收尾卡片同样标共享 —— 它是覆盖上去的那一张", () => {
+  const card = buildSettledCard("已批准") as { config?: { update_multi?: boolean } };
+  assert.equal(card.config?.update_multi, true);
+});

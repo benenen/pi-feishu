@@ -27,10 +27,19 @@ function safeDetail(text: string): string {
     : `${points.slice(0, MAX_DETAIL_CHARS - 1).join("")}…`;
 }
 
+/**
+ * `update_multi: true` = 共享卡片，**不是可选的**。
+ *
+ * 收尾走的 `im.v1.message.patch` 只能更新共享卡片；默认的独享卡片是每个接收者
+ * 一份独立副本，patch 改不动。症状很迷惑：点「允许」后 pi 照常放行（审批那边
+ * 是兑现了的），但卡片上的按钮一直杵在那儿，看不出批没批过，也不知道该不该再点。
+ */
+const CARD_CONFIG = { wide_screen_mode: true, update_multi: true };
+
 export function buildApprovalCard(id: string, req: ApprovalRequest): object {
   const detail = safeDetail(detailOf(req));
   return {
-    config: { wide_screen_mode: true },
+    config: CARD_CONFIG,
     header: {
       template: "orange",
       title: { tag: "plain_text", content: `⚠️ 需要审批：${req.toolName}` },
@@ -66,7 +75,7 @@ export function buildApprovalCard(id: string, req: ApprovalRequest): object {
 
 export function buildSettledCard(status: string): object {
   return {
-    config: { wide_screen_mode: true },
+    config: CARD_CONFIG,
     elements: [{ tag: "div", text: { tag: "lark_md", content: `**${status}**` } }],
   };
 }
