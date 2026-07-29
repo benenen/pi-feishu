@@ -42,6 +42,7 @@ pi 事件 (agent_start / message_update / tool_execution_*) ──►│
 | `feishu.ts` | 飞书网关（direct 档）。包住 `createLarkChannel`，收敛 SDK 的事件与出站 API |
 | `inbound.ts` | SDK 消息 → `InboundMessage` 的映射，以及会话名称缓存。direct/broker 两档共用 |
 | `gate.ts` | 入站放行判定（`gateInbound`）。无依赖，bridge 与 renderer 共用同一份状态机 |
+| `deferred.ts` | 回合进行中来自其他对话的消息要扣住，等这轮跑完再单独成回合。见下方 |
 | `broker/` | broker 档。`gateway.ts` 是会话侧客户端，其余（`server`/`channel`/`registry`/`protocol`）跑在 broker 进程里 |
 | `risk.ts` | 安全判定。三档模型，详见下方 |
 | `approval.ts` | 多通道审批竞速（飞书卡片 vs 终端对话框），先到先得 |
@@ -75,6 +76,28 @@ pi 的 TUI 不接管 stderr，`console.error` 会直接打进渲染区（光标�
 `feishu.ts` 的 `streamTurn`/`sendText` 刻意**不**自我包含异常（会 reject）。
 `bridge.ts` 侧统一兜底 —— 任何 gateway 调用的 rejection 都不能逃进 pi 的事件循环。
 新增 gateway 调用点时，照着现有四处的写法包好。
+
+### pi 把排队消息并进同一个 agent 运行，所以跨对话的消息必须自己扣住
+
+`pi-agent-core` 的 `agent-loop.js`：agent 本该结束时发现有 followUp，就把它塞进
+`pendingMessages` 然后 **`continue` 外层循环** —— 不发 `agent_end`，也不再发一次
+`agent_start`。一次运行从头到尾只有一个 `agent_start`。
+
+而本扩展是「一次 `agent_start` = 一条飞书流」，目标在 `startTurn` 那一刻定死。
+所以**回合进行中来自别的对话的消息，答案会整段发进上一个对话** —— 那边只看到一个
+表情，一个字都收不到。这不是竞态，是必然。
+
+对策：`shouldDefer` 判定为真时不投给 pi，扣在 `DeferredQueue` 里，等 `agent_settled`
+再作为新 prompt 发出去，自然开出新的 `agent_start`。
+
+两个点不能改错：
+
+- **必须是 `agent_settled`，不能是 `agent_end`。** `_emitAgentSettled` 是先把
+  `_isAgentRunActive = false` 再 emit 的，只有在它里面 `sendUserMessage` 才会走非排队
+  路径。在 `agent_end` 里发会被当成排队消息并回同一个运行，等于没修。
+- **判定要用有效目标**（`#turnTarget ?? gateway.boundChatId`）。终端敲字发起的回合
+  没有飞书来源，`#turnTarget` 是空的，但流照样发往已绑定会话；只看原值会误判成
+  「没有目标」而放行。
 
 ### `implements GatewayLike` 挡不住「少写一个可选参数」
 

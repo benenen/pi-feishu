@@ -396,6 +396,10 @@ function targetTrackingGateway(sink: {
 
 const MULTI = { ...CONFIG, multiChat: true };
 
+function emptySink() {
+  return { streams: [] as (string | undefined)[], texts: [], asks: [] };
+}
+
 test("流式失败时补发的全文也发回同一个来源", async () => {
   const texts: { text: string; to?: string }[] = [];
   const gw = targetTrackingGateway({ streams: [], texts, asks: [] });
@@ -512,4 +516,80 @@ test("两条来自不同对话的消息，各自的回合回各自的对话", as
   await bridge.endTurn();
 
   assert.deepEqual(sink.streams, ["oc_dm", "oc_group"]);
+});
+
+// ── 回合进行中来自其他对话的消息 ──────────────────────────────────
+
+test("回合进行中，来自别的对话的消息要扣住", () => {
+  const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
+  bridge.noteInboundOrigin("oc_dm");
+  bridge.startTurn();
+
+  assert.equal(bridge.shouldDefer("oc_group"), true, "不扣的话答案会整段发进私聊");
+  assert.equal(bridge.shouldDefer("oc_dm"), false, "同一个对话照旧并进当前回合");
+});
+
+test("终端发起的回合也要保护 —— 它流向已绑定会话，不是「没有目标」", () => {
+  // 终端敲字时 #lastOrigin 是空的，但流实际发往已绑定的私聊。
+  // 只看 #turnTarget 会以为「没目标」而放行，群消息照样串进私聊
+  const gw = targetTrackingGateway(emptySink());
+  const bridge = new Bridge(MULTI, { ...gw, boundChatId: "oc_dm" }, () => {}, () => 0, 1000);
+  bridge.clearInboundOrigin();
+  bridge.startTurn();
+
+  assert.equal(bridge.shouldDefer("oc_group"), true);
+  assert.equal(bridge.shouldDefer("oc_dm"), false);
+});
+
+test("空闲时不扣任何消息", () => {
+  const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
+  assert.equal(bridge.shouldDefer("oc_group"), false);
+});
+
+test("私聊回合跑完后，扣住的群消息各自成回合、回到群里", async () => {
+  // 这是本次修复的核心回归：pi 把 followUp 并进同一个 agent 运行
+  // （只有一次 agent_start），所以扣住 + 单独成回合是唯一能发对地方的做法
+  const sink = emptySink();
+  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
+
+  bridge.noteInboundOrigin("oc_dm");
+  bridge.startTurn();
+  assert.equal(bridge.shouldDefer("oc_group"), true);
+  bridge.defer("oc_group", "帮我看下这个");
+  await bridge.endTurn();
+
+  const pending = bridge.takeDeferred();
+  assert.deepEqual(pending, { chatId: "oc_group", text: "帮我看下这个" });
+
+  // 接线层拿到后重新发起 —— 新回合的来源就是群
+  bridge.noteInboundOrigin(pending!.chatId);
+  bridge.startTurn();
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_dm", "oc_group"], "群的答案没回到群里");
+});
+
+test("扣住的消息按先来后到出队", async () => {
+  const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
+  bridge.noteInboundOrigin("oc_dm");
+  bridge.startTurn();
+  bridge.defer("oc_g1", "一");
+  bridge.defer("oc_g2", "二");
+  await bridge.endTurn();
+
+  assert.equal(bridge.takeDeferred()?.chatId, "oc_g1");
+  assert.equal(bridge.takeDeferred()?.chatId, "oc_g2");
+  assert.equal(bridge.takeDeferred(), undefined);
+});
+
+test("停止桥接时，扣住的消息要能全部取出来告知发送者", () => {
+  const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
+  bridge.noteInboundOrigin("oc_dm");
+  bridge.startTurn();
+  bridge.defer("oc_g1", "一");
+  bridge.defer("oc_g2", "二");
+
+  const stranded = bridge.takeAllDeferred();
+  assert.equal(stranded.length, 2, "静默丢掉的话，两个人都在等一个永远不来的回复");
+  assert.equal(bridge.takeDeferred(), undefined);
 });

@@ -237,12 +237,22 @@ export default function (pi: ExtensionAPI) {
           const content = await br.toPromptContent(msg);
           const { text, deliverAs } = decideDelivery(content, br.isStreaming);
           if (text === "") return;
-          // 登记来源，agent_start 时按 FIFO 认领 —— pi 的事件不带触发者信息。
-          // steer 是插进当前回合、不开新回合的，入队会让之后每个回合都错位一个
           // 开始处理就给这条消息加个「在看」的表情 —— 飞书没有给机器人
           // 「标记已读」的接口，表情是通行做法。fire-and-forget：加不上不该
           // 影响消息处理，react 内部已自兜异常
           void gw.react?.(msg.messageId, cfg.readReceiptEmoji);
+
+          // 回合进行中、且这条来自别的对话 → 扣住，等这轮跑完再单独成回合。
+          // 直接排队的话 pi 会把它并进同一个 agent 运行，答案整段发进上一个
+          // 对话，这边只剩一个表情。理由详见 deferred.ts
+          if (br.shouldDefer(msg.chatId)) {
+            if (br.defer(msg.chatId, text)) {
+              await gw.sendText("正在处理另一个对话的请求，稍后回复你。", msg.chatId);
+            } else {
+              await gw.sendText("排队的消息太多了，这条没接住，请稍后再发一次。", msg.chatId);
+            }
+            return;
+          }
 
           br.noteInboundOrigin(msg.chatId);
           await pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
@@ -320,6 +330,7 @@ export default function (pi: ExtensionAPI) {
 
   async function stop(notify: (msg: string) => void): Promise<void> {
     const gw = gateway;
+    const br = bridge;
     gateway = undefined;
     bridge = undefined;
     if (!gw) {
@@ -331,6 +342,12 @@ export default function (pi: ExtensionAPI) {
     pairing?.cancel();
     pairing = undefined;
     notify("飞书桥接已停止");
+    // 扣住的消息一条都不会再处理了，必须挨个告知 ——
+    // 静默丢掉的话，那几个人会一直等一个永远不来的回复
+    for (const stranded of br?.takeAllDeferred() ?? []) {
+      await gw.sendText("飞书桥接已停止，你刚才那条消息不会被处理了。", stranded.chatId)
+        .catch((err: unknown) => log(`告知未处理消息失败：${String(err)}`, "warning"));
+    }
     await gw.disconnect();
   }
 
@@ -431,6 +448,29 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_end", async () => {
     await bridge?.endTurn();
+  });
+
+  // 放行扣住的消息。必须是 agent_settled 而不是 agent_end ——
+  // agent_settled 的发出点在 `_isAgentRunActive = false` 之后
+  // （agent-session.js 的 _emitAgentSettled），此时 sendUserMessage 才会走
+  // 非排队路径、开出一个新的 agent_start；在 agent_end 里发会被当成排队消息
+  // 并回同一个运行，等于没修。
+  //
+  // 一次只放一条：它自己会开一个新回合，下一条等那个回合 settled 再放，
+  // 天然就是先来后到。
+  pi.on("agent_settled", async () => {
+    const br = bridge;
+    const gw = gateway;
+    if (!br || !gw) return;
+    const next = br.takeDeferred();
+    if (!next) return;
+    try {
+      br.noteInboundOrigin(next.chatId);
+      await pi.sendUserMessage(next.text);
+    } catch (err) {
+      log(`扣住的消息重新发起失败：${String(err)}`, "error");
+      await gw.sendText("刚才那条消息没能处理，请再发一次。", next.chatId).catch(() => {});
+    }
   });
 
   pi.on("tool_call", async (event, ctx) => {

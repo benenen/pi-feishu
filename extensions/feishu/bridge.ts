@@ -13,6 +13,7 @@ import {
   renderUserPrompt,
 } from "./renderer.ts";
 import type { Config } from "./config.ts";
+import { DeferredQueue, shouldDefer, type DeferredMessage } from "./deferred.ts";
 export { gateInbound, type GateState, type InboundGate } from "./gate.ts";
 import type { InboundMessage } from "./feishu.ts";
 import type { LogFn } from "./log.ts";
@@ -210,6 +211,7 @@ export class Bridge {
 
   /** 当前回合的出站目标 */
   #turnTarget: string | undefined;
+  #deferred = new DeferredQueue();
   #toolStartedAt = new Map<string, number>();
   /**
    * 操作员点了「本回合全部允许」。只在当前 agent 回合内有效，
@@ -274,6 +276,39 @@ export class Bridge {
   /** 终端敲的输入没有飞书来源，必须清掉 —— 否则会沿用上一条飞书消息的对话 */
   clearInboundOrigin(): void {
     this.#lastOrigin = undefined;
+  }
+
+  /**
+   * 当前回合的**有效**出站目标：回合没记来源时，流实际发往网关的默认收件方
+   * （已绑定会话）。终端敲字发起的回合正是这种情况。
+   */
+  get turnTarget(): string | undefined {
+    if (!this.#turn) return undefined;
+    return this.#turnTarget ?? this.#gateway.boundChatId;
+  }
+
+  /** 这条消息是否该扣住，等当前回合跑完再单独成回合。理由见 deferred.ts */
+  shouldDefer(chatId: string): boolean {
+    return shouldDefer({
+      streaming: this.isStreaming,
+      turnTarget: this.turnTarget,
+      chatId,
+    });
+  }
+
+  /** 扣住一条消息。队列满时返回 false，由调用方当场回绝，不静默丢 */
+  defer(chatId: string, text: string): boolean {
+    return this.#deferred.push({ chatId, text });
+  }
+
+  /** 取一条扣住的消息去重新发起。回合彻底结束（agent_settled）后调用 */
+  takeDeferred(): DeferredMessage | undefined {
+    return this.#deferred.shift();
+  }
+
+  /** 取出全部扣住的消息 —— 停止桥接时要挨个告知，不能让人干等 */
+  takeAllDeferred(): DeferredMessage[] {
+    return this.#deferred.takeAll();
   }
 
   startTurn(): void {
