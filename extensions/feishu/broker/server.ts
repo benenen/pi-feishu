@@ -33,6 +33,46 @@ interface Conn {
   asks: Map<string, AbortController>;
 }
 
+/** unix socket 连接要么立刻连上、要么立刻被拒（ECONNREFUSED/ENOENT），正常情况不会卡住 */
+const PROBE_TIMEOUT_MS = 500;
+
+/**
+ * 探测 socketPath 是否有活着的进程在监听。
+ *
+ * 用于区分「上次崩溃残留的死文件」（该删）和「当前还活着的 broker 正占用」
+ * （绝不能删）——不区分这两者，无条件 rmSync 会让第二个误启动的 broker 静默
+ * 接管 socket，第一个仍存活、仍握着飞书长连接，一声不吭。
+ *
+ * true  —— 连上了，有活 broker 占着
+ * false —— 连不上（ECONNREFUSED/ENOENT 等），是死文件
+ * 抛错   —— 探测本身超时、状态不明；fail-closed：不确定就不删
+ */
+function probeAlive(socketPath: string): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const sock = net.createConnection(socketPath);
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      sock.destroy();
+      reject(new Error(`探测 ${socketPath} 是否被占用超时，为安全起见拒绝启动`));
+    }, PROBE_TIMEOUT_MS);
+    sock.once("connect", () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.destroy();
+      resolve(true);
+    });
+    sock.once("error", () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+}
+
 export class BrokerServer {
   #server: net.Server | undefined;
   #conns = new Map<string, Conn>();
@@ -56,7 +96,11 @@ export class BrokerServer {
   }
 
   async listen(socketPath: string): Promise<void> {
-    // 上次非正常退出会留下 socket 文件，不清掉会 EADDRINUSE
+    // 上次非正常退出会留下 socket 文件，不清掉会 EADDRINUSE —— 但无条件删
+    // 不区分「死文件」和「活着的 broker 正占用」，必须先探活。
+    if (fs.existsSync(socketPath) && (await probeAlive(socketPath))) {
+      throw new Error(`该 socket 已被另一个 broker 占用：${socketPath}`);
+    }
     fs.rmSync(socketPath, { force: true });
 
     const server = net.createServer((socket) => this.#onConnection(socket));

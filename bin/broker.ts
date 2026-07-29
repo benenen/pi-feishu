@@ -19,6 +19,23 @@ const log = (msg: string, level: NotifyLevel = "info"): void => {
   process.stderr.write(`[broker][${level}] ${msg}\n`);
 };
 
+// 进程级兜底。上面（以及 channel.ts / server.ts 内部）已经把所有已知的失败点都
+// 手动兜住了，但 server.deliver() 是在飞书 SDK 的事件回调里同步调用的——真有
+// 漏网的抛出/rejection，Node 的默认行为是直接崩掉：uncaughtException 没人接就
+// 打印裸栈退出，unhandledRejection 在现代 Node 里默认行为等同于 uncaughtException。
+// 两种情况都不会留下一行经 log() 格式化、能被日志系统认出来的记录。
+// 记录之后直接退出，不在这里尝试 server.close()/channel.disconnect() 那套优雅
+// 关闭：uncaughtException 之后进程状态已不可信，继续跑异步逻辑等它们 resolve
+// 风险比直接退出更大，交给 systemd/supervisor 之类的进程管理器重启更安全。
+process.on("uncaughtException", (err) => {
+  log(`未捕获的异常，broker 退出：${String(err)}`, "error");
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  log(`未处理的 Promise rejection，broker 退出：${String(reason)}`, "error");
+  process.exit(1);
+});
+
 const cwd = process.cwd();
 const agentDir = getAgentDir();
 

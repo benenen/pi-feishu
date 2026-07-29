@@ -298,6 +298,37 @@ test("形状不对的畸形帧被静默忽略，不影响后续正常帧", async
   await server.close();
 });
 
+test("对已被占用的 socket 再次 listen 会被拒绝，且原 server 仍可用", async () => {
+  const serverA = new BrokerServer({ channel: fakeChannel([]), pairingTtlMs: 600_000, log: () => {} });
+  const p = tmpSock();
+  await serverA.listen(p);
+
+  const serverB = new BrokerServer({ channel: fakeChannel([]), pairingTtlMs: 600_000, log: () => {} });
+  await assert.rejects(() => serverB.listen(p), /已被另一个 broker 占用/);
+
+  // 关键断言：第二次 listen 失败不能连累第一个 —— 它必须还活着，
+  // 还能正常接受新连接、走完整个握手。
+  const c = await connect(p);
+  c.send({ t: "hello", cwd: "/w", label: "A" });
+  await c.waitFor("hello_ok");
+  assert.equal(serverA.sessionCount, 1);
+
+  c.sock.destroy();
+  await serverA.close();
+});
+
+test("崩溃残留的死 socket 文件（没有活着的监听者）仍然会被正常清理并 listen 成功", async () => {
+  const p = tmpSock();
+  // 模拟「上次非正常退出」：路径上有个文件，但没有任何进程在监听它
+  fs.writeFileSync(p, "残留文件，不是真的 socket");
+
+  const server = new BrokerServer({ channel: fakeChannel([]), pairingTtlMs: 600_000, log: () => {} });
+  await server.listen(p);
+  assert.equal(fs.statSync(p).mode & 0o777, 0o600);
+
+  await server.close();
+});
+
 test("孤儿 stream_chunk / stream_end 各留一条 warning，stream_end 仍照常回 ok", async () => {
   const logs: Array<{ msg: string; level?: string }> = [];
   const server = new BrokerServer({
