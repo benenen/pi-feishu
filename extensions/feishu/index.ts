@@ -176,6 +176,9 @@ export default function (pi: ExtensionAPI) {
     gw.onMessage((msg) => {
       void (async () => {
         try {
+          // 先登记来源，在任何放行判定之前 —— 被挡掉的消息也要有来源，
+          // 否则回绝的话都发不回去
+          br.recordInbound(msg);
           // 待配对时，未绑定状态下只认配对码 —— 任何其他消息都不该绑上来，
           // 否则「先握手再绑定」就形同虚设。
           // broker 档下这个分支恒为假，是安全的死代码：broker 模式从不创建本地
@@ -249,7 +252,7 @@ export default function (pi: ExtensionAPI) {
           // 直接排队的话 pi 会把它并进同一个 agent 运行，答案整段发进上一个
           // 对话，这边只剩一个表情。理由详见 deferred.ts
           if (br.shouldDefer(msg.chatId)) {
-            if (br.defer(msg.chatId, text)) {
+            if (br.defer(msg.messageId, msg.chatId, text)) {
               await gw.sendText("正在处理另一个对话的请求，稍后回复你。", msg.chatId);
             } else {
               await gw.sendText("排队的消息太多了，这条没接住，请稍后再发一次。", msg.chatId);
@@ -257,7 +260,9 @@ export default function (pi: ExtensionAPI) {
             return;
           }
 
-          br.noteInboundOrigin(msg.chatId);
+          // 登记发给 pi 的原文。before_agent_start 会带着同一个字符串回来，
+          // 那时按它认领，就知道这个回合归哪条消息、该发回哪个对话
+          br.noteInboundPrompt(msg.messageId, text);
           await pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
         } catch (err) {
           log(`处理入站消息失败：${String(err)}`, "error");
@@ -424,9 +429,19 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("input", (event) => {
     const source = event.source === "extension" ? "feishu" : "interactive";
-    // 终端敲的输入没有飞书来源；不清掉的话，这个回合会沿用上一条飞书消息的对话
-    if (source === "interactive") bridge?.clearInboundOrigin();
     bridge?.onUserPrompt(event.text, source);
+  });
+
+  // 认领触发这轮的那条消息。必须在 agent_start 之前，而 pi 正是这个顺序：
+  // before_agent_start 在 prompt() 里发（agent-session.js 的 emitBeforeAgentStart），
+  // agent_start 由随后启动的 agent 循环发出。
+  //
+  // 这是 pi 唯一提供的「回合 ↔ 消息」关联：event.prompt 就是 sendUserMessage
+  // 收到的原字符串（走 expandPromptTemplates: false，pi 不改写）。
+  // 终端敲的字也会走到这儿，认领不到任何消息，于是来源置空、出站退回已绑定会话 ——
+  // 这正好替掉了原先手动清 #lastOrigin 的那一步。
+  pi.on("before_agent_start", (event) => {
+    bridge?.claimTurnOrigin(event.prompt);
   });
 
   pi.on("agent_start", () => bridge?.startTurn());
@@ -474,7 +489,9 @@ export default function (pi: ExtensionAPI) {
     const next = br.takeDeferred();
     if (!next) return;
     try {
-      br.noteInboundOrigin(next.chatId);
+      // 扣住时走的是提前 return，原文还没登记过 —— 现在补上，
+      // 否则 before_agent_start 认领不到，这条的答案会发回上一个对话
+      br.noteInboundPrompt(next.messageId, next.text);
       await pi.sendUserMessage(next.text);
     } catch (err) {
       log(`扣住的消息重新发起失败：${String(err)}`, "error");
@@ -500,6 +517,8 @@ export default function (pi: ExtensionAPI) {
         }
       : undefined;
 
-    return await bridge.gateToolCall(event.toolName, event.input, tuiAsker);
+    // 把这次工具调用绑到触发它的那条消息，审批卡片才能弹回原始对话
+    bridge.origins.bindToolCall(event.toolCallId, bridge.originMessageId);
+    return await bridge.gateToolCall(event.toolName, event.input, tuiAsker, event.toolCallId);
   });
 }

@@ -43,6 +43,7 @@ pi 事件 (agent_start / message_update / tool_execution_*) ──►│
 | `inbound.ts` | SDK 消息 → `InboundMessage` 的映射，以及会话名称缓存。direct/broker 两档共用 |
 | `gate.ts` | 入站放行判定（`gateInbound`）。无依赖，bridge 与 renderer 共用同一份状态机 |
 | `deferred.ts` | 回合进行中来自其他对话的消息要扣住，等这轮跑完再单独成回合。见下方 |
+| `origin-registry.ts` | 消息级来源登记表：`messageId → chatId`，按原文认领回合来源，工具调用绑消息 |
 | `broker/` | broker 档。`gateway.ts` 是会话侧客户端，其余（`server`/`channel`/`registry`/`protocol`）跑在 broker 进程里 |
 | `risk.ts` | 安全判定。三档模型，详见下方 |
 | `approval.ts` | 多通道审批竞速（飞书卡片 vs 终端对话框），先到先得 |
@@ -89,6 +90,24 @@ pi 的 TUI 不接管 stderr，`console.error` 会直接打进渲染区（光标�
 
 对策：`shouldDefer` 判定为真时不投给 pi，扣在 `DeferredQueue` 里，等 `agent_settled`
 再作为新 prompt 发出去，自然开出新的 `agent_start`。
+
+### 回合来源只能靠 before_agent_start 的 prompt 认领
+
+pi 不提供「这个回合是哪条消息触发的」：`agent_start` 是空事件，`sendUserMessage`
+收不了元数据。唯一的钥匙是 `before_agent_start.prompt` —— 它就是 `sendUserMessage`
+收到的原字符串（`expandPromptTemplates: false`，pi 不改写），且恰好在 `agent_start`
+之前发出。
+
+所以入站时把 `messageId → { chatId, senderId }` 和「发给 pi 的原文」一起登记进
+`origin-registry.ts`，`before_agent_start` 上按原文认领，出站一律按 messageId 回查。
+**不要再引入任何「最近一条是谁」的全局变量** —— 两条消息接连进来时它必错。
+
+认领关联在 `agent_settled` 清，**不能在 `agent_end` 清**：自动重试会在一次运行里
+开多个回合，而 `before_agent_start` 只发一次。
+
+历史上为这件事错过三版，根因都是**赌 pi 的内部顺序**：FIFO 队列（要求「一个回合
+恰好一个槽位」）、`input.text` 关联、会话条目倒推（要求 `agent_start` 时触发这轮的
+用户消息已在 `getEntries()` 里 —— 实测不成立）。
 
 ### 「飞书流开着」和「pi 忙不忙」是两个生命周期，混用会丢消息
 

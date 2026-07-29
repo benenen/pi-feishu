@@ -125,16 +125,41 @@
 
 ### 来源是怎么定位的
 
-pi 的 `agent_start` 事件是空的（`{ type: "agent_start" }`），`sendUserMessage` 也收不了
-元数据 —— 「这个回合是谁触发的」上游不提供。
+出站要知道「这个回合该发回哪个对话」。pi 的 `agent_start` 是空事件
+（`{ type: "agent_start" }`），`sendUserMessage` 也收不了元数据 —— 这个映射上游不提供。
 
-所以用的是不依赖 pi 内部顺序的最小模型：**记住最近一条飞书入站消息的来源**，
-终端输入把它清掉，`startTurn` 时快照成本回合的出站目标。
+唯一可用的钥匙是 **`before_agent_start` 事件带的 `prompt`**：它就是
+`sendUserMessage` 收到的那个字符串（走 `expandPromptTemplates: false`，pi 不改写），
+而且**恰好在 `agent_start` 之前**发出。所以：
 
-（这里试过三种「更聪明」的做法，全部失败，根因都是**赌了 pi 的内部顺序**：FIFO 队列
-要求「一个回合恰好一个槽位」，steer/followUp 被合并就错位；文本关联要求 `input.text`
-与发出的原文一一对应；会话条目倒推要求 `agent_start` 时触发这轮的用户消息已经在
-`getEntries()` 里 —— 实测不成立，解析恒为「无」，于是全都回落到已绑定会话。）
+```
+入站消息到达 → 登记 messageId → { chatId, senderId, ts }
+发给 pi 之前 → 把「最终发出去的原文」也登记上
+before_agent_start → 按原文认领，得到 messageId
+agent_start        → 出站目标 = 按 messageId 回查的 chatId
+工具调用           → toolCallId 绑到同一个 messageId，审批卡片按它弹回原对话
+```
+
+登记表在 `origin-registry.ts`，出站一律「按 messageId 查对话」，没有任何
+「最近一条是谁」的全局变量。
+
+几个要点：
+
+- **认领是一次性的**，否则下个回合会把上一轮的消息再认一遍。两个对话发一模一样的
+  话时按先来后到分配
+- **认领不删记录** —— 整个回合的流式、补发全文、审批卡片都还要按 messageId 回查。
+  关联在 `agent_settled` 才清（不能在 `agent_end` 清：一次运行里自动重试会开多个
+  回合，而 `before_agent_start` 只发一次）
+- **认不到就是「没有来源」**，退回已绑定会话。终端敲的字正是这种情况 —— 它也走
+  `before_agent_start`，但原文对不上任何登记过的消息
+- 记录有上限（200 条）并按插入序淘汰，长会话不会无限攒
+
+单会话档（`multiChat` 关）不查登记表，出站一律走已绑定会话，与改造前一致。
+
+（此前用的是一个 `#lastOrigin` 字符串记「最近一条入站消息来自哪」，回合开始时快照。
+两条消息接连进来时它必错：后到的那条会把先到的覆盖掉，先跑的回合于是回给了后说话
+的那个人。在此之前还试过 FIFO 队列和会话条目倒推，都失败了 —— 根因都是**赌 pi 的
+内部顺序**，而 `before_agent_start` 是唯一不用赌的那条路。）
 
 ### 回合进行中，别的对话发来的消息会先被扣住
 

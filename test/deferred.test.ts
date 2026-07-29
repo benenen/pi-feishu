@@ -22,10 +22,10 @@ test("回合没有明确目标时不扣 —— 没有要保护的对话", () => 
 
 test("队列按先来后到出队", () => {
   const q = new DeferredQueue();
-  q.push({ chatId: "oc_a", text: "第一条" });
-  q.push({ chatId: "oc_b", text: "第二条" });
-  assert.deepEqual(q.shift(), { chatId: "oc_a", text: "第一条" });
-  assert.deepEqual(q.shift(), { chatId: "oc_b", text: "第二条" });
+  q.push({ messageId: "om_x", chatId: "oc_a", text: "第一条" });
+  q.push({ messageId: "om_x", chatId: "oc_b", text: "第二条" });
+  assert.deepEqual(q.shift(), { messageId: "om_x", chatId: "oc_a", text: "第一条" });
+  assert.deepEqual(q.shift(), { messageId: "om_x", chatId: "oc_b", text: "第二条" });
   assert.equal(q.shift(), undefined);
 });
 
@@ -33,16 +33,16 @@ test("队列满时拒收新的，而不是挤掉旧的", () => {
   // 旧的那些已经答应过人家「稍后回复」，挤掉就是失约；拒收新的还能当场告诉他
   const q = new DeferredQueue();
   for (let i = 0; i < MAX_DEFERRED; i += 1) {
-    assert.equal(q.push({ chatId: "oc_a", text: `第 ${i} 条` }), true);
+    assert.equal(q.push({ messageId: "om_x", chatId: "oc_a", text: `第 ${i} 条` }), true);
   }
-  assert.equal(q.push({ chatId: "oc_a", text: "溢出的" }), false);
-  assert.deepEqual(q.shift(), { chatId: "oc_a", text: "第 0 条" }, "最早那条被挤掉了");
+  assert.equal(q.push({ messageId: "om_x", chatId: "oc_a", text: "溢出的" }), false);
+  assert.deepEqual(q.shift(), { messageId: "om_x", chatId: "oc_a", text: "第 0 条" }, "最早那条被挤掉了");
 });
 
 test("takeAll 取出全部并清空 —— 停止桥接时要挨个告知", () => {
   const q = new DeferredQueue();
-  q.push({ chatId: "oc_a", text: "一" });
-  q.push({ chatId: "oc_b", text: "二" });
+  q.push({ messageId: "om_x", chatId: "oc_a", text: "一" });
+  q.push({ messageId: "om_x", chatId: "oc_b", text: "二" });
   assert.equal(q.takeAll().length, 2);
   assert.equal(q.size, 0);
   assert.equal(q.shift(), undefined);

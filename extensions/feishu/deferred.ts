@@ -1,4 +1,6 @@
 export interface DeferredMessage {
+  /** 放行时要靠它把原文登记回来源表，否则认领不到、答案会发回上一个对话 */
+  messageId: string;
   chatId: string;
   text: string;
 }

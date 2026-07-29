@@ -400,6 +400,20 @@ function emptySink() {
   return { streams: [] as (string | undefined)[], texts: [], asks: [] };
 }
 
+/**
+ * 走一遍真实的入站→认领链路：登记消息 → 登记发给 pi 的原文 →
+ * before_agent_start 按原文认领。测试里不该直接塞一个 chatId 进去，
+ * 那样就绕过了正要验的那段。
+ */
+let seq = 0;
+function claimFrom(bridge: Bridge, chatId: string, messageId?: string, text?: string) {
+  const id = messageId ?? `om_${(seq += 1)}`;
+  const prompt = text ?? `来自 ${chatId} 的第 ${seq} 条`;
+  bridge.recordInbound({ messageId: id, chatId, senderId: "ou_1" });
+  bridge.noteInboundPrompt(id, prompt);
+  bridge.claimTurnOrigin(prompt);
+}
+
 test("流式失败时补发的全文也发回同一个来源", async () => {
   const texts: { text: string; to?: string }[] = [];
   const gw = targetTrackingGateway({ streams: [], texts, asks: [] });
@@ -411,7 +425,7 @@ test("流式失败时补发的全文也发回同一个来源", async () => {
   };
   const bridge = new Bridge(MULTI, failing, () => {}, () => 0, 1000);
 
-  bridge.noteInboundOrigin("oc_group");
+  claimFrom(bridge, "oc_group");
   bridge.startTurn();
   bridge.onTextDelta("结果");
   await bridge.endTurn();
@@ -429,7 +443,7 @@ test("审批卡片发到触发该回合的那个对话", async () => {
     1000,
   );
 
-  bridge.noteInboundOrigin("oc_group");
+  claimFrom(bridge, "oc_group");
   bridge.startTurn();
   await bridge.gateToolCall("bash", { command: "rm -rf x" }, undefined);
 
@@ -492,11 +506,11 @@ test("终端输入清掉来源 —— 不能沿用上一条飞书消息的对话
   const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
   const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
 
-  bridge.noteInboundOrigin("oc_group");
+  claimFrom(bridge, "oc_group");
   bridge.startTurn();
   await bridge.endTurn();
 
-  bridge.clearInboundOrigin(); // 终端敲了一句
+  bridge.claimTurnOrigin("我在终端敲的"); // 终端敲了一句：认领不到任何消息
   bridge.startTurn();
   await bridge.endTurn();
 
@@ -507,11 +521,11 @@ test("两条来自不同对话的消息，各自的回合回各自的对话", as
   const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
   const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
 
-  bridge.noteInboundOrigin("oc_dm");
+  claimFrom(bridge, "oc_dm");
   bridge.startTurn();
   await bridge.endTurn();
 
-  bridge.noteInboundOrigin("oc_group");
+  claimFrom(bridge, "oc_group");
   bridge.startTurn();
   await bridge.endTurn();
 
@@ -522,7 +536,7 @@ test("两条来自不同对话的消息，各自的回合回各自的对话", as
 
 test("回合进行中，来自别的对话的消息要扣住", () => {
   const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
-  bridge.noteInboundOrigin("oc_dm");
+  claimFrom(bridge, "oc_dm");
   bridge.startTurn();
 
   assert.equal(bridge.shouldDefer("oc_group"), true, "不扣的话答案会整段发进私聊");
@@ -534,7 +548,7 @@ test("终端发起的回合也要保护 —— 它流向已绑定会话，不是
   // 只看 #turnTarget 会以为「没目标」而放行，群消息照样串进私聊
   const gw = targetTrackingGateway(emptySink());
   const bridge = new Bridge(MULTI, { ...gw, boundChatId: "oc_dm" }, () => {}, () => 0, 1000);
-  bridge.clearInboundOrigin();
+  bridge.claimTurnOrigin("我在终端敲的");
   bridge.startTurn();
 
   assert.equal(bridge.shouldDefer("oc_group"), true);
@@ -552,17 +566,21 @@ test("私聊回合跑完后，扣住的群消息各自成回合、回到群里",
   const sink = emptySink();
   const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
 
-  bridge.noteInboundOrigin("oc_dm");
+  claimFrom(bridge, "oc_dm");
   bridge.startTurn();
   assert.equal(bridge.shouldDefer("oc_group"), true);
-  bridge.defer("oc_group", "帮我看下这个");
+  bridge.defer("om_group", "oc_group", "帮我看下这个");
   await bridge.endTurn();
 
   const pending = bridge.takeDeferred();
-  assert.deepEqual(pending, { chatId: "oc_group", text: "帮我看下这个" });
+  assert.deepEqual(pending, {
+    messageId: "om_group",
+    chatId: "oc_group",
+    text: "帮我看下这个",
+  });
 
   // 接线层拿到后重新发起 —— 新回合的来源就是群
-  bridge.noteInboundOrigin(pending!.chatId);
+  claimFrom(bridge, pending!.chatId, pending!.messageId, pending!.text);
   bridge.startTurn();
   await bridge.endTurn();
 
@@ -571,10 +589,10 @@ test("私聊回合跑完后，扣住的群消息各自成回合、回到群里",
 
 test("扣住的消息按先来后到出队", async () => {
   const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
-  bridge.noteInboundOrigin("oc_dm");
+  claimFrom(bridge, "oc_dm");
   bridge.startTurn();
-  bridge.defer("oc_g1", "一");
-  bridge.defer("oc_g2", "二");
+  bridge.defer("om_g1", "oc_g1", "一");
+  bridge.defer("om_g2", "oc_g2", "二");
   await bridge.endTurn();
 
   assert.equal(bridge.takeDeferred()?.chatId, "oc_g1");
@@ -584,10 +602,10 @@ test("扣住的消息按先来后到出队", async () => {
 
 test("停止桥接时，扣住的消息要能全部取出来告知发送者", () => {
   const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
-  bridge.noteInboundOrigin("oc_dm");
+  claimFrom(bridge, "oc_dm");
   bridge.startTurn();
-  bridge.defer("oc_g1", "一");
-  bridge.defer("oc_g2", "二");
+  bridge.defer("om_g1", "oc_g1", "一");
+  bridge.defer("om_g2", "oc_g2", "二");
 
   const stranded = bridge.takeAllDeferred();
   assert.equal(stranded.length, 2, "静默丢掉的话，两个人都在等一个永远不来的回复");
@@ -602,7 +620,7 @@ test("agent_end 之后 pi 仍可能在忙，isAgentActive 要撑到 settled", as
   // 会被 prompt() 抛 "Agent is already processing"，消息就丢了
   const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
 
-  bridge.noteInboundOrigin("oc_dm");
+  claimFrom(bridge, "oc_dm");
   bridge.startTurn();
   assert.equal(bridge.isAgentActive, true);
 
@@ -616,7 +634,7 @@ test("agent_end 之后 pi 仍可能在忙，isAgentActive 要撑到 settled", as
 
 test("窗口期内来自别的对话的消息仍然要扣住", async () => {
   const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
-  bridge.noteInboundOrigin("oc_dm");
+  claimFrom(bridge, "oc_dm");
   bridge.startTurn();
   await bridge.endTurn();
 
@@ -626,7 +644,7 @@ test("窗口期内来自别的对话的消息仍然要扣住", async () => {
 
 test("settled 之后恢复正常，不再扣任何消息", async () => {
   const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
-  bridge.noteInboundOrigin("oc_dm");
+  claimFrom(bridge, "oc_dm");
   bridge.startTurn();
   await bridge.endTurn();
   bridge.settleAgent();
@@ -639,7 +657,7 @@ test("一次运行里的自动重试会开多个回合，settled 只来一次", 
   // pi 的 _handlePostAgentRun 会用 agent.continue() 再开一轮，
   // 于是 agent_start/agent_end 成对出现多次，agent_settled 只有一次
   const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
-  bridge.noteInboundOrigin("oc_dm");
+  claimFrom(bridge, "oc_dm");
 
   bridge.startTurn();
   await bridge.endTurn();
@@ -649,4 +667,100 @@ test("一次运行里的自动重试会开多个回合，settled 只来一次", 
 
   bridge.settleAgent();
   assert.equal(bridge.isAgentActive, false);
+});
+
+// ── 消息级来源登记：出站按 messageId 回查，不再靠「最近一条是谁」 ──────
+
+test("两条消息先后进来，先跑的那个回合回给先说话的那个", async () => {
+  // #lastOrigin 时代这里必错：B 一到就把 A 覆盖掉，A 的回合会回给 B。
+  // 按原文认领之后，谁触发的回合就查回谁
+  const sink = emptySink();
+  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
+
+  bridge.recordInbound({ messageId: "om_A", chatId: "oc_私聊", senderId: "ou_1" });
+  bridge.noteInboundPrompt("om_A", "先问的这句");
+  bridge.recordInbound({ messageId: "om_B", chatId: "oc_群", senderId: "ou_2" });
+  bridge.noteInboundPrompt("om_B", "后问的那句");
+
+  // pi 先跑 A
+  bridge.claimTurnOrigin("先问的这句");
+  bridge.startTurn();
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  bridge.claimTurnOrigin("后问的那句");
+  bridge.startTurn();
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_私聊", "oc_群"]);
+});
+
+test("终端敲的字认领不到消息，退回已绑定会话", async () => {
+  const sink = emptySink();
+  const gw = { ...targetTrackingGateway(sink), boundChatId: "oc_私聊" };
+  const bridge = new Bridge(MULTI, gw, () => {}, () => 0, 1000);
+
+  bridge.recordInbound({ messageId: "om_A", chatId: "oc_群", senderId: "ou_1" });
+  bridge.noteInboundPrompt("om_A", "群里问的");
+  bridge.claimTurnOrigin("群里问的");
+  bridge.startTurn();
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  // 终端敲的原文对不上任何登记过的消息
+  bridge.claimTurnOrigin("我在终端敲的");
+  bridge.startTurn();
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_群", "oc_私聊"], "终端那轮该回落到已绑定会话");
+});
+
+test("一次运行里自动重试开多个回合，来源不能在 endTurn 就被清掉", async () => {
+  // before_agent_start 一次运行只发一次，认领关联要撑到 agent_settled
+  const sink = emptySink();
+  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
+
+  claimFrom(bridge, "oc_群", "om_A", "群里问的");
+  bridge.startTurn();
+  await bridge.endTurn();
+  bridge.startTurn(); // pi 自动重试，没有新的 before_agent_start
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_群", "oc_群"]);
+});
+
+test("单会话档不查登记表，出站一律走已绑定会话", async () => {
+  // 向后兼容：multiChat 关着时行为与改造前一致
+  const sink = emptySink();
+  const gw = { ...targetTrackingGateway(sink), boundChatId: "oc_绑定的" };
+  const bridge = new Bridge(CONFIG, gw, () => {}, () => 0, 1000);
+
+  claimFrom(bridge, "oc_别处", "om_A", "随便一句");
+  bridge.startTurn();
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_绑定的"]);
+});
+
+test("审批卡片弹回触发这次工具调用的那个对话", async () => {
+  const sink = emptySink();
+  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
+
+  claimFrom(bridge, "oc_群", "om_A", "把这个删了");
+  bridge.startTurn();
+  bridge.origins.bindToolCall("tc_1", bridge.originMessageId);
+  await bridge.gateToolCall("bash", { command: "rm -rf a" }, undefined, "tc_1");
+
+  assert.deepEqual(sink.asks, ["oc_群"]);
+});
+
+test("没绑过的工具调用退回本回合的目标，不会漏到别处", async () => {
+  const sink = emptySink();
+  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
+
+  claimFrom(bridge, "oc_群", "om_A", "把这个删了");
+  bridge.startTurn();
+  await bridge.gateToolCall("bash", { command: "rm -rf a" }, undefined, "tc_没绑过");
+
+  assert.deepEqual(sink.asks, ["oc_群"]);
 });

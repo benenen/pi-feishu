@@ -14,6 +14,7 @@ import {
 } from "./renderer.ts";
 import type { Config } from "./config.ts";
 import { DeferredQueue, shouldDefer, type DeferredMessage } from "./deferred.ts";
+import { MessageOriginRegistry } from "./origin-registry.ts";
 export { gateInbound, type GateState, type InboundGate } from "./gate.ts";
 import type { InboundMessage } from "./feishu.ts";
 import type { LogFn } from "./log.ts";
@@ -199,23 +200,23 @@ interface TurnState {
 
 export class Bridge {
   #turn: TurnState | undefined;
-  /**
-   * 最近一次飞书入站消息的来源。终端输入会把它清掉。
-   *
-   * 试过两种「更聪明」的做法都栽了，原因都是**赌了 pi 的内部顺序**：
-   *   - FIFO 队列：要求「一个回合恰好一个槽位」，steer/followUp 被合并就破
-   *   - 会话条目倒推：要求 agent_start 时触发这轮的用户消息已在 getEntries() 里，
-   *     实测不成立（解析恒为「无」，于是всё 回落到已绑定会话）
-   * pi 的 agent_start 是空事件、sendUserMessage 收不了元数据，这个映射上游不提供。
-   * 所以退回不依赖任何顺序假设的最小模型：谁最后说话，这个回合就回给谁。
-   *
-   * 已知边界：两个对话几乎同时发消息且都排队时，先跑的那个回合会回给后说话的那个。
-   * 单人使用（自己的私聊 + 自己在的群）碰不到；多人共用要严格隔离请用 broker 模式。
-   */
-  #lastOrigin: string | undefined;
 
-  /** 当前回合的出站目标 */
-  #turnTarget: string | undefined;
+  /**
+   * 消息级来源登记表。出站一律「按 messageId 查对话」，不再有任何
+   * 「最近一条是谁」的全局变量。详见 origin-registry.ts。
+   */
+  #origins: MessageOriginRegistry;
+
+  /**
+   * 本次 pi 运行认领到的那条消息。由 `claimTurnOrigin()` 在 `before_agent_start`
+   * 上按原文认领，`settleAgent()` 时清掉。
+   *
+   * 认不到就是 undefined —— 终端敲的字正是这种情况，出站退回网关的默认收件方。
+   * 注意**不能**在 `endTurn` 清：一次运行里自动重试会开多个回合，
+   * 而 `before_agent_start` 只发一次。
+   */
+  #originMessageId: string | undefined;
+
   #deferred = new DeferredQueue();
   #toolStartedAt = new Map<string, number>();
   /**
@@ -270,6 +271,12 @@ export class Bridge {
     this.#log = log;
     this.#now = now;
     this.#drainTimeoutMs = drainTimeoutMs;
+    this.#origins = new MessageOriginRegistry(now);
+  }
+
+  /** 排查用；出站请走 turnTarget / askerFor，别直接读表 */
+  get origins(): MessageOriginRegistry {
+    return this.#origins;
   }
 
   /** 出站一律不得把异常抛回 pi 的事件循环 */
@@ -290,28 +297,57 @@ export class Bridge {
     });
   }
 
-  /** 转发入站消息给 pi 之前调用，记下这条消息来自哪个对话 */
-  noteInboundOrigin(chatId: string): void {
-    this.#lastOrigin = chatId;
+  /** 入站消息一到就登记来源，在任何放行判定之前 */
+  recordInbound(msg: { messageId: string; chatId: string; senderId: string }): void {
+    this.#origins.record(msg);
   }
 
-  /** 终端敲的输入没有飞书来源，必须清掉 —— 否则会沿用上一条飞书消息的对话 */
-  clearInboundOrigin(): void {
-    this.#lastOrigin = undefined;
+  /** 登记这条消息最终发给 pi 的原文，供 before_agent_start 按原文认领 */
+  noteInboundPrompt(messageId: string, promptText: string): void {
+    this.#origins.indexPrompt(messageId, promptText);
   }
 
   /**
-   * 当前回合的**有效**出站目标：回合没记来源时，流实际发往网关的默认收件方
-   * （已绑定会话）。终端敲字发起的回合正是这种情况。
+   * `before_agent_start` 上按原文认领触发这轮的消息。
+   *
+   * 这是 pi 唯一提供的、能把「回合」和「消息」对上的东西：`agent_start` 是空事件，
+   * `sendUserMessage` 收不了元数据，而 `before_agent_start.prompt` 就是
+   * `sendUserMessage` 收到的原字符串，且恰好在 `agent_start` 之前发出。
+   *
+   * 认不到就置空 —— 终端敲的字走的也是这条路，此时必须是「没有来源」，
+   * 沿用上一次的会把终端的回合发进飞书上一个对话。
+   */
+  claimTurnOrigin(prompt: string): void {
+    this.#originMessageId = this.#origins.claimByPrompt(prompt)?.messageId;
+  }
+
+  /** 本回合认领到的消息，未认领到时 undefined。工具调用绑定要用 */
+  get originMessageId(): string | undefined {
+    return this.#originMessageId;
+  }
+
+  /**
+   * 当前运行的**有效**出站目标：按认领到的 messageId 回查对话；查不到就退回
+   * 网关的默认收件方（已绑定会话）—— 终端敲字发起的回合正是这种情况。
+   *
+   * 单会话档（`multiChat` 关）保持原有行为：出站一律走已绑定会话，不查登记表。
    */
   get turnTarget(): string | undefined {
     if (!this.#agentActive) return undefined;
-    return this.#turnTarget ?? this.#gateway.boundChatId;
+    if (!this.#config.multiChat) return this.#gateway.boundChatId;
+    return this.#origins.chatOf(this.#originMessageId) ?? this.#gateway.boundChatId;
   }
 
-  /** pi 的运行彻底结束（agent_settled）时调用 */
+  /**
+   * pi 的运行彻底结束（agent_settled）时调用。
+   * 认领的关联在这里清 —— 不能在 endTurn 清，自动重试会在一次运行里开多个回合。
+   */
   settleAgent(): void {
     this.#agentActive = false;
+    if (this.#originMessageId !== undefined) {
+      this.#origins.forget(this.#originMessageId);
+      this.#originMessageId = undefined;
+    }
   }
 
   /** 这条消息是否该扣住，等当前回合跑完再单独成回合。理由见 deferred.ts */
@@ -324,8 +360,8 @@ export class Bridge {
   }
 
   /** 扣住一条消息。队列满时返回 false，由调用方当场回绝，不静默丢 */
-  defer(chatId: string, text: string): boolean {
-    return this.#deferred.push({ chatId, text });
+  defer(messageId: string, chatId: string, text: string): boolean {
+    return this.#deferred.push({ messageId, chatId, text });
   }
 
   /** 取一条扣住的消息去重新发起。回合彻底结束（agent_settled）后调用 */
@@ -344,7 +380,9 @@ export class Bridge {
     this.#agentActive = true;
     if (this.#turn) return;
     this.#turnApproved = false;
-    this.#turnTarget = this.#lastOrigin;
+    // 出站目标不再是回合开始时快照下来的字符串，而是每次按认领到的
+    // messageId 回查 —— 见 turnTarget
+    const target = this.turnTarget;
     const stream = new TurnStream();
     const turn: TurnState = {
       stream,
@@ -355,7 +393,7 @@ export class Bridge {
       pumping: Promise.resolve(),
     };
     turn.pumping = this.#gateway
-      .streamTurn(async (sink) => stream.pump(sink), this.#turnTarget)
+      .streamTurn(async (sink) => stream.pump(sink), target)
       .catch((err) => {
         turn.streamFailed = true;
         this.#log(`飞书流式发送失败，将在回合结束后补发全文：${String(err)}`, "warning");
@@ -418,18 +456,24 @@ export class Bridge {
     // 流式卡片废了（断线/限流/元素超限/收尾超时）时，把全文作为普通消息补发一次
     if (turn.streamFailed && turn.transcript.trim() !== "") {
       try {
-        await this.#gateway.sendText(turn.transcript, this.#turnTarget);
+        await this.#gateway.sendText(turn.transcript, this.turnTarget);
       } catch (err) {
         this.#log(`补发全文也失败了，本回合内容仅存在于终端：${String(err)}`, "error");
       }
     }
   }
 
-  /** tool_call 钩子：危险则审批，拒绝则返回阻塞结果 */
+  /**
+   * tool_call 钩子：危险则审批，拒绝则返回阻塞结果。
+   *
+   * `toolCallId` 用来把审批卡片弹回触发这次调用的那个对话（经登记表回查）。
+   * 省略时退回本回合的目标 —— 老调用点和测试仍然能用。
+   */
   async gateToolCall(
     toolName: string,
     input: Record<string, unknown>,
     tuiAsker: Asker | undefined,
+    toolCallId?: string,
   ): Promise<{ block: true; reason: string } | undefined> {
     // 判定本身抛错必须按危险处理。这是个 async 函数，未捕获的异常会变成
     // rejected promise 直接跳过 block 契约 —— 结果是危险工具被放行，
@@ -453,7 +497,10 @@ export class Bridge {
     // 本回合已被整体批准，后续危险调用不再打扰操作员
     if (this.#turnApproved) return undefined;
 
-    const askers: Asker[] = [this.#gateway.askerFor(this.#turnTarget)];
+    // 审批卡片要弹回**触发这次调用**的那个对话。工具调用绑过消息就按它回查，
+    // 否则退回本回合的目标 —— 弹错地方等于让不相干的人看见并批准
+    const askTarget = this.#origins.chatOfToolCall(toolCallId ?? "") ?? this.turnTarget;
+    const askers: Asker[] = [this.#gateway.askerFor(askTarget)];
     if (tuiAsker) askers.push(tuiAsker);
 
     let decision: Decision;
