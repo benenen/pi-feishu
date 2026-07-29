@@ -6,6 +6,7 @@ import { chatLabel } from "./renderer.ts";
 import type { AppendSink } from "./turn-stream.ts";
 import type { Asker, Decision } from "./approval.ts";
 import type { Config } from "./config.ts";
+import type { InboundMessage } from "./types.ts";
 import {
   ApprovalRegistry,
   buildApprovalCard,
@@ -14,12 +15,7 @@ import {
   resolveTarget,
 } from "./approval-card.ts";
 
-export interface InboundMessage {
-  chatId: string;
-  senderId: string;
-  text: string;
-  imageKeys: string[];
-}
+export type { InboundMessage } from "./types.ts";
 
 export class FeishuGateway {
   #channel: LarkChannel | undefined;
