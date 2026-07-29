@@ -95,6 +95,25 @@ export interface StatusInfo {
   streaming?: boolean;
   /** 操作员是否点过「本回合全部允许」 */
   turnApproved?: boolean;
+  /**
+   * broker 档：与 broker 进程的连接是否还活着。
+   * 扩展侧「运行中」只看 gateway 存不存在，断线后仍为真 —— 少了这一项，
+   * 状态会理直气壮地说「运行中 · 绑定会话：oc_x」，而实际上什么都发不出去。
+   */
+  brokerConnected?: boolean;
+}
+
+/**
+ * 飞书侧 `/feishu unbind` 的回执。
+ *
+ * broker 档下解绑**不签发新配对码**（绑定权在 broker 手里，签发要回终端），
+ * 沿用 direct 那句「下一条消息会重新绑定会话」会把人卡在飞书里等一个永远
+ * 不会发生的绑定 —— 下一条消息只会被 broker 回一句「请发送配对码」。
+ */
+export function renderUnbindNotice(transport: "direct" | "broker"): string {
+  return transport === "broker"
+    ? "已解绑。broker 模式下不会自动签发新配对码，请回终端执行 `/feishu pair` 取码，再把它发到要绑定的对话里。"
+    : "已解绑，下一条消息会重新绑定会话。";
 }
 
 /**
@@ -106,23 +125,37 @@ export function renderStatus(info: StatusInfo): string {
     return "飞书桥接：未运行。在终端用 `/feishu start` 启动。";
   }
   const c = info.config;
+  const isBroker = c.transport === "broker";
 
-  const bindWay =
-    c.bindTarget === "operator"
+  // broker 档下 bindTarget 的 operator / oc_xxx / none 三档全被忽略（绑定权在
+  // broker 的路由表里），照着它推绑定方式会说出「启动时私信操作员绑定」这种
+  // 根本没发生过的事
+  const bindWay = isBroker
+    ? "由 broker 按配对码绑定"
+    : c.bindTarget === "operator"
       ? "启动时私信操作员绑定"
       : c.bindTarget === "none"
         ? "等首条消息绑定"
-        : `启动时直接绑定 ${c.bindTarget}`;
+        : c.bindTarget === "code"
+          ? "配对码绑定"
+          : `启动时直接绑定 ${c.bindTarget}`;
+
+  const transport = isBroker
+    ? `broker · ${info.brokerConnected === false ? "**连接已断开**" : "已连接"} · ${c.brokerSocket}`
+    : "direct（本会话自己连飞书）";
+
   const named =
     info.boundChatName !== undefined && info.boundChatName !== ""
       ? `${info.boundChatName} · ${info.boundChatId}`
       : `${info.boundChatId}`;
-  const bound =
-    info.boundChatId !== undefined
-      ? `${named}（${bindWay}）`
-      : info.pairingPending
-        ? "等待配对 —— 在要绑定的对话里发送终端上显示的配对码"
-        : `尚未绑定，下一条通过策略的消息会绑定它（${bindWay}）`;
+  // broker 档下本地没有 pairing 的概念，且「下一条消息会绑定它」是反的 ——
+  // 未配对时下一条消息只会被 broker 回一句「请发送配对码」
+  const unbound = isBroker
+    ? "尚未绑定 —— 在要绑定的对话里发送终端上显示的配对码（`/feishu pair` 可重新取码）"
+    : info.pairingPending
+      ? "等待配对 —— 在要绑定的对话里发送终端上显示的配对码"
+      : `尚未绑定，下一条通过策略的消息会绑定它（${bindWay}）`;
+  const bound = info.boundChatId !== undefined ? `${named}（${bindWay}）` : unbound;
 
   const dm =
     c.dmMode === "open" ? "所有人可私聊" : `仅白名单 ${c.dmAllowlist.length} 人`;
@@ -142,6 +175,7 @@ export function renderStatus(info: StatusInfo): string {
   return [
     "飞书桥接：运行中",
     `· 应用：${c.appId}`,
+    `· 传输：${transport}`,
     `· 绑定会话：${bound}`,
     `· 当前：${turn}${exempt}`,
     `· 私聊：${dm}`,

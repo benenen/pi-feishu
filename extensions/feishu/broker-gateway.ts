@@ -40,6 +40,8 @@ export class BrokerGateway implements GatewayLike {
   #seq = 0;
   #bound: string | undefined;
   #messageHandler: ((msg: InboundMessage) => void) | undefined;
+  /** 正在主动断开 —— 随之而来的 close 事件是预期内的，不该报警 */
+  #closing = false;
 
   // strip-only 模式不支持构造函数参数属性，依赖写成显式字段
   readonly #log: LogFn;
@@ -52,6 +54,17 @@ export class BrokerGateway implements GatewayLike {
 
   get boundChatId(): string | undefined {
     return this.#bound;
+  }
+
+  /**
+   * 与 broker 的连接是否还活着。
+   *
+   * index.ts 拿 `gateway !== undefined` 当「运行中」，断线之后它仍为真 ——
+   * `/feishu status` 必须能从这里看出连接已经掉了，否则用户只看到一堆
+   * 「飞书流式发送失败」，不知道是 broker 挂了。
+   */
+  get connected(): boolean {
+    return this.#socket !== undefined;
   }
 
   bind(chatId: string): void {
@@ -80,14 +93,31 @@ export class BrokerGateway implements GatewayLike {
     // 只清 #pending 不够：往后新发起的调用还是会摸到这个已经死掉的 socket，
     // #post 里的 write 静默无操作、#await 照样注册一个再也不会 settle 的 pending，
     // 请求就此永久挂起。必须把 #socket 也清空，让后续调用能借到这条报警线。
-    // close/error 可能都触发（对端 RST 时两个都会来），两次调用都要是幂等的：
-    // 置 undefined 两次无副作用，#failAllPending 第二次面对空 Map 也是空操作。
+    //
+    // 光清 #socket 也不够：#bound 留着的话本地状态就是假的 —— `/feishu status`
+    // 会照样显示「运行中 · 绑定会话：oc_x」，而实际上每次 sendText 都在报错。
+    // 用户只看到一堆「飞书流式发送失败」，没人告诉他 broker 掉了，所以还要报警。
+    //
+    // close/error 可能都触发（对端 RST 时两个都会来），必须幂等：置 undefined
+    // 两次无副作用，#failAllPending 第二次面对空 Map 也是空操作，日志用 failed 去重。
+    let failed = false;
     const fail = () => {
+      const first = !failed;
+      failed = true;
       this.#socket = undefined;
+      this.#bound = undefined;
+      // 主动 disconnect（停止桥接、会话切换）是预期内的，不该报 error 吓人
+      if (first && !this.#closing) {
+        this.#log(
+          "与 broker 的连接已断开，飞书桥接已不可用。请重新拉起 broker 进程，再执行 /feishu start",
+          "error",
+        );
+      }
       this.#failAllPending("broker 连接已断开");
     };
     socket.on("close", fail);
     socket.on("error", fail);
+    this.#closing = false;
     this.#socket = socket;
 
     this.#post({ t: "hello", cwd, label });
@@ -95,8 +125,10 @@ export class BrokerGateway implements GatewayLike {
   }
 
   async disconnect(): Promise<void> {
+    this.#closing = true;
     const s = this.#socket;
     this.#socket = undefined;
+    this.#bound = undefined;
     s?.destroy();
     this.#failAllPending("broker 连接已关闭");
   }
@@ -115,6 +147,15 @@ export class BrokerGateway implements GatewayLike {
   }
 
   async streamTurn(run: (sink: AppendSink) => Promise<void>): Promise<void> {
+    // 未绑定就安静地什么都不做，对齐 FeishuGateway.streamTurn 的
+    // `if (!channel || !to) return`。
+    //
+    // Bridge.startTurn() 不看绑定状态，broker 档下未配对时每个终端回合都会走到
+    // 这里。不拦的话：broker 对 stream_begin 回 err，而客户端要到 stream_end
+    // 之后才登记 pending（两者共用同一个 id）—— 长回合里 err 先到、无人认领被
+    // 丢弃，streamTurn 照常 resolve，bridge 以为流式成功而不补发全文，整回合内容
+    // 静默丢失；顺带还会把整回合的 delta 推给 broker，在它那边刷出成百条 warning。
+    if (this.#bound === undefined) return;
     const id = this.#nextId();
     this.#post({ t: "stream_begin", id });
     const sink: AppendSink = {

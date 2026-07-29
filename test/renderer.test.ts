@@ -12,6 +12,7 @@ import {
   renderUserPrompt,
   chatLabel,
   renderStatus,
+  renderUnbindNotice,
 } from "../extensions/feishu/renderer.ts";
 
 test("formatDuration 分档", () => {
@@ -241,4 +242,75 @@ test("status：配对码本身不出现在状态文本里", () => {
   // renderStatus 根本拿不到码，这里钉死这个契约
   assert.equal(Object.keys({ pairingPending: true }).includes("pairingCode"), false);
   assert.equal(out.includes("ABCD"), false);
+});
+
+// ---------------------------------------------------------------------------
+// 传输模式（direct / broker）—— broker 档下 bindTarget 被忽略，文案必须跟着分支
+// ---------------------------------------------------------------------------
+
+const BROKER_CFG: Config = { ...CFG, transport: "broker", brokerSocket: "/agent/feishu-broker.sock" };
+
+test("status：看得出当前是 direct 还是 broker —— 排查时第一个想知道的就是它", () => {
+  assert.match(renderStatus({ running: true, config: CFG, boundChatId: "oc_x" }), /direct/);
+  assert.match(
+    renderStatus({ running: true, config: BROKER_CFG, boundChatId: "oc_x", brokerConnected: true }),
+    /broker/,
+  );
+});
+
+test("status：broker 档不能拿 bindTarget 编造绑定方式 —— 它在这一档根本不生效", () => {
+  const out = renderStatus({
+    // bindTarget 是默认的 operator，direct 档下会说「启动时私信操作员绑定」
+    running: true,
+    config: BROKER_CFG,
+    boundChatId: "oc_x",
+    brokerConnected: true,
+  });
+  assert.equal(out.includes("私信操作员"), false, "broker 档下 bindTarget 被忽略，不能这么说");
+  assert.match(out, /配对码/, "broker 档下绑定只有配对码一条路");
+});
+
+test("status：broker 连接断了必须看得出来 —— 否则只看到一堆发送失败，不知道是 broker 掉了", () => {
+  const live = renderStatus({
+    running: true,
+    config: BROKER_CFG,
+    boundChatId: "oc_x",
+    brokerConnected: true,
+  });
+  const dead = renderStatus({
+    running: true,
+    config: BROKER_CFG,
+    boundChatId: "oc_x",
+    brokerConnected: false,
+  });
+  assert.equal(live.includes("已断开"), false);
+  assert.match(dead, /已断开/);
+});
+
+test("status：broker 档未绑定时说的是「发配对码」，不是「下一条消息会绑定它」", () => {
+  // broker 档下本地 pairing 恒为 undefined，旧实现会落到「下一条通过策略的消息
+  // 会绑定它」——这句话是反的：下一条消息只会被 broker 回「请发送配对码」
+  const out = renderStatus({ running: true, config: BROKER_CFG, brokerConnected: true });
+  assert.equal(out.includes("下一条通过策略的消息会绑定"), false);
+  assert.match(out, /配对码/);
+});
+
+test("status：bindTarget 为 code 时说的是配对码，不是「直接绑定 code」", () => {
+  const out = renderStatus({
+    running: true,
+    config: { ...CFG, bindTarget: "code" },
+    boundChatId: "oc_x",
+  });
+  assert.equal(out.includes("直接绑定 code"), false, "code 不是会话 id，不能当成 oc_xxx 那样回显");
+  assert.match(out, /配对码/);
+});
+
+test("unbind 回执：broker 档不会自动签发新码，必须告诉用户回终端取码", () => {
+  const broker = renderUnbindNotice("broker");
+  assert.match(broker, /已解绑/);
+  assert.match(broker, /pair/, "要指出下一步是回终端 /feishu pair");
+  assert.equal(broker.includes("下一条消息会重新绑定"), false, "broker 档下这句是错的，会把人卡住");
+
+  const direct = renderUnbindNotice("direct");
+  assert.match(direct, /下一条消息会重新绑定/);
 });

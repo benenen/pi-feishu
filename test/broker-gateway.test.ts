@@ -129,14 +129,15 @@ test("streamTurn 把 append 转成 stream_chunk，收尾发 stream_end", async (
 
   const gw = new BrokerGateway(() => {});
   await gw.connect(p, "A", "/a");
+  gw.bind("oc_1"); // 未绑定时 streamTurn 会直接返回（见下面那条测试）
   await gw.streamTurn(async (sink) => {
     await sink.append("前半");
     await sink.append("后半");
   });
-  assert.deepEqual(chunks, ["前半", "后半"]);
-  assert.equal(ended, true);
   await gw.disconnect();
   await b.close();
+  assert.deepEqual(chunks, ["前半", "后半"]);
+  assert.equal(ended, true);
 });
 
 test("cardAsker 把请求发给 broker 并用回来的裁决 resolve", async () => {
@@ -284,4 +285,97 @@ test("意外断线（不调用 disconnect）之后，新发起的请求立刻 re
 
   await gw.disconnect();
   await new Promise<void>((r) => server.close(() => r()));
+});
+
+test("未绑定时 streamTurn 直接返回 —— 不把整回合的 delta 推给 broker", async () => {
+  // broker 档下 Bridge.startTurn() 不看绑定状态，未配对时每个终端回合都会走到
+  // streamTurn。不在这里拦掉的话：broker 对 stream_begin 回 err（此时客户端还没
+  // 登记 pending，err 被丢弃）、每个 chunk 在 broker 侧刷一条 warning，而
+  // streamTurn 最后照常 resolve —— bridge 以为流式成功、不补发全文，整回合内容
+  // 静默丢失。对齐 FeishuGateway.streamTurn 的 `if (!channel || !to) return`。
+  const p = tmpSock();
+  const seen: ClientFrame[] = [];
+  const b = fakeBroker(p, (f, reply) => {
+    seen.push(f);
+    if (f.t === "hello") reply({ t: "hello_ok" });
+  });
+  await b.listen();
+
+  const gw = new BrokerGateway(() => {}, 200);
+  await gw.connect(p, "A", "/a");
+  seen.length = 0;
+  assert.equal(gw.boundChatId, undefined);
+
+  // 没修之前 streamTurn 会一路发帧、最后 await 一个没人回的 id 而 reject；
+  // 先把结果收成一个值，清理完再断言（断言/异常跳过清理会让 node:test 挂死）
+  const outcome = await gw
+    .streamTurn(async (sink) => {
+      await sink.append("一大段回合内容");
+    })
+    .then(() => "resolved", (err: unknown) => `rejected:${String(err)}`);
+  await new Promise((r) => setTimeout(r, 60));
+
+  await gw.disconnect();
+  await b.close();
+  assert.deepEqual(seen, [], `未配对时一个流式帧都不该发出去，实际发了：${seen.map((f) => f.t).join(",")}`);
+  assert.equal(outcome, "resolved", "对齐 direct 档：未绑定就是安静地什么都不做");
+});
+
+test("broker 断线后清掉本地绑定并报一条 error —— 状态不能还说「已绑定」", async () => {
+  const p = tmpSock();
+  let serverSocket: net.Socket | undefined;
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    const reader = new FrameReader();
+    socket.on("data", (chunk: Buffer) => {
+      for (const f of reader.push(chunk) as ClientFrame[]) {
+        if (f.t === "hello") {
+          socket.write(encodeFrame({ t: "hello_ok" }));
+          socket.write(encodeFrame({ t: "bound", chatId: "oc_9" }));
+        }
+      }
+    });
+  });
+  await new Promise<void>((r) => server.listen(p, () => r()));
+
+  const logs: Array<{ msg: string; level?: string }> = [];
+  const gw = new BrokerGateway((msg, level) => void logs.push({ msg, level }));
+  try {
+    await gw.connect(p, "A", "/a");
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(gw.boundChatId, "oc_9");
+    assert.equal(gw.connected, true);
+
+    // 模拟 broker 崩了：服务端断开，客户端全程不调用 disconnect()
+    serverSocket?.destroy();
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(gw.connected, false, "连接状态必须如实反映");
+    assert.equal(gw.boundChatId, undefined, "断线后本地的绑定就是假的了，必须清掉");
+    assert.equal(
+      logs.filter((l) => l.level === "error").length,
+      1,
+      `断线要报警且只报一次（close/error 可能都触发），实际：${JSON.stringify(logs)}`,
+    );
+  } finally {
+    await gw.disconnect();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+test("主动 disconnect 是预期内的停止，不该报 error 吓人", async () => {
+  const p = tmpSock();
+  const b = fakeBroker(p, (f, reply) => {
+    if (f.t === "hello") reply({ t: "hello_ok" });
+  });
+  await b.listen();
+
+  const logs: Array<{ msg: string; level?: string }> = [];
+  const gw = new BrokerGateway((msg, level) => void logs.push({ msg, level }));
+  await gw.connect(p, "A", "/a");
+  await gw.disconnect();
+  await new Promise((r) => setTimeout(r, 50));
+  await b.close();
+
+  assert.deepEqual(logs.filter((l) => l.level === "error"), []);
 });

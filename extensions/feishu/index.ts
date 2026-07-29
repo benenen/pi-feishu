@@ -14,7 +14,7 @@ import {
   parseControlCommand,
   shouldAccept,
 } from "./bridge.ts";
-import { renderStatus } from "./renderer.ts";
+import { renderStatus, renderUnbindNotice } from "./renderer.ts";
 import { createPairing, type Pairing } from "./pairing.ts";
 import type { Asker } from "./approval.ts";
 
@@ -157,8 +157,13 @@ export default function (pi: ExtensionAPI) {
           if (control) {
             if (control.kind === "stop") await stop((m) => void gw.sendText(m));
             else if (control.kind === "unbind") {
-              // 先回执再解绑：解绑后 sendText 没有默认收件方，必须显式指定本会话
-              await gw.sendText("已解绑，下一条消息会重新绑定会话。", msg.chatId);
+              // 先回执再解绑：解绑后 sendText 没有默认收件方，必须显式指定本会话。
+              // broker 档下解绑不签发新码，回执得说清楚下一步，否则用户会卡在
+              // 飞书里等一个永远不会发生的「下一条消息自动绑定」
+              await gw.sendText(
+                renderUnbindNotice(gw instanceof BrokerGateway ? "broker" : "direct"),
+                msg.chatId,
+              );
               gw.unbind();
             } else if (control.kind === "status") {
               await gw.sendText(await statusText());
@@ -230,6 +235,8 @@ export default function (pi: ExtensionAPI) {
       pairingPending: pairing?.pending,
       streaming: bridge?.isStreaming,
       turnApproved: bridge?.turnApproved,
+      // gateway 存在只说明「启动过」，broker 掉了它照样是 truthy
+      brokerConnected: gateway instanceof BrokerGateway ? gateway.connected : undefined,
     });
   }
 

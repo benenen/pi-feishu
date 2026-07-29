@@ -31,7 +31,15 @@ interface Conn {
   reader: FrameReader;
   streams: Map<string, { stream: TurnStream; done: Promise<void> }>;
   asks: Map<string, AbortController>;
+  /** 已经为哪些流 id 记过孤儿 chunk 的日志 —— 一个回合几百个 delta，不能每块一条 */
+  orphanWarned: Set<string>;
 }
+
+/**
+ * 孤儿流 id 的留痕上限。正常客户端最多产生个位数，超出说明对端在乱发；
+ * 不设上限的话，一个失控的对端能靠不断换 id 把 broker 的内存撑大。
+ */
+const MAX_ORPHAN_WARNED = 64;
 
 /** unix socket 连接要么立刻连上、要么立刻被拒（ECONNREFUSED/ENOENT），正常情况不会卡住 */
 const PROBE_TIMEOUT_MS = 500;
@@ -154,7 +162,14 @@ export class BrokerServer {
 
   #onConnection(socket: net.Socket): void {
     const id = randomUUID();
-    const conn: Conn = { id, socket, reader: new FrameReader(), streams: new Map(), asks: new Map() };
+    const conn: Conn = {
+      id,
+      socket,
+      reader: new FrameReader(),
+      streams: new Map(),
+      asks: new Map(),
+      orphanWarned: new Set(),
+    };
     this.#conns.set(id, conn);
 
     socket.on("data", (chunk: Buffer) => {
@@ -253,8 +268,9 @@ export class BrokerServer {
         const entry = conn.streams.get(f.id);
         if (!entry) {
           // 正常客户端不会走到这：要么 id 打错了，要么 stream_end/断线清理已经跑过。
-          // 协议层没有其他排查手段，至少留一行日志。
-          this.#log(`收到未知流的 stream_chunk（id=${f.id}），已丢弃`, "warning");
+          // 协议层没有其他排查手段，至少留一行日志 —— 但只留一行：一个回合是几百个
+          // delta，每块一条会把日志冲得没法看（实测 200 个 delta → 201 条 warning）。
+          this.#warnOrphan(conn, "stream_chunk", f.id);
           return;
         }
         entry.stream.push(f.text);
@@ -331,6 +347,14 @@ export class BrokerServer {
         this.#log(`收到无法识别的帧，已忽略：${JSON.stringify(f)}`, "warning");
         return;
     }
+  }
+
+  /** 同一个流 id 只留一次痕。超过上限就不再记，避免对端靠换 id 把内存撑大 */
+  #warnOrphan(conn: Conn, kind: string, streamId: string): void {
+    if (conn.orphanWarned.has(streamId)) return;
+    if (conn.orphanWarned.size >= MAX_ORPHAN_WARNED) return;
+    conn.orphanWarned.add(streamId);
+    this.#log(`收到未知流的 ${kind}（id=${streamId}），已丢弃`, "warning");
   }
 
   #send(connId: string, frame: ServerFrame): void {

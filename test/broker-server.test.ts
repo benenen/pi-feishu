@@ -479,3 +479,35 @@ test("孤儿 stream_chunk / stream_end 各留一条 warning，stream_end 仍照�
   c.sock.destroy();
   await server.close();
 });
+
+test("孤儿 stream_chunk 每个 id 只记一次日志 —— 不能一个回合刷几百条", async () => {
+  // broker 档下未配对时，会话侧每个回合都会把整回合的 delta 推过来。
+  // 每块记一条 warning 的话，200 个 delta 就是 200 条 —— 日志被冲得没法看。
+  const logs: Array<{ msg: string; level?: string }> = [];
+  const server = new BrokerServer({
+    channel: fakeChannel([]),
+    pairingTtlMs: 600_000,
+    log: (msg, level) => void logs.push({ msg, level }),
+  });
+  const p = tmpSock();
+  await server.listen(p);
+  const c = await connect(p);
+  try {
+    c.send({ t: "hello", cwd: "/w", label: "A" });
+    await c.waitFor("hello_ok");
+
+    for (let i = 0; i < 30; i += 1) c.send({ t: "stream_chunk", id: "野id", text: `第${i}块` });
+    c.send({ t: "stream_chunk", id: "另一个野id", text: "别的流" });
+    // 帧是按序处理的：等这条的响应到手，就说明上面的 chunk 都处理完了
+    c.send({ t: "send_text", id: "屏障", markdown: "x" });
+    await c.waitFor("err");
+
+    const chunkLogs = logs.filter((l) => l.msg.includes("stream_chunk"));
+    assert.equal(chunkLogs.length, 2, `每个 id 一条，实际 ${chunkLogs.length} 条`);
+    assert.ok(chunkLogs.some((l) => l.msg.includes("野id")));
+    assert.ok(chunkLogs.some((l) => l.msg.includes("另一个野id")));
+  } finally {
+    c.sock.destroy();
+    await server.close();
+  }
+});
