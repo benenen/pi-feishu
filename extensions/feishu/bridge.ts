@@ -20,10 +20,15 @@ export interface GatewayLike {
   boundChatId?: string;
   bind(chatId: string): void;
   onMessage(handler: (msg: InboundMessage) => void): void;
-  streamTurn(run: (sink: AppendSink) => Promise<void>): Promise<void>;
+  /** to 省略时发往网关的默认收件方 */
+  streamTurn(run: (sink: AppendSink) => Promise<void>, to?: string): Promise<void>;
   sendText(markdown: string, to?: string): Promise<void>;
   downloadImage(fileKey: string): Promise<Buffer | undefined>;
-  cardAsker: Asker;
+  /**
+   * 面向指定会话的审批通道。多会话模式下，卡片必须弹回触发该回合的那个对话 ——
+   * 弹错地方就是让不相干的人看见并批准。
+   */
+  askerFor(to?: string): Asker;
 }
 
 /**
@@ -66,7 +71,14 @@ export function decideDelivery(
   return isStreaming ? { text, deliverAs: "followUp" } : { text };
 }
 
-export function shouldAccept(gateway: { boundChatId?: string }, chatId: string): boolean {
+export function shouldAccept(
+  gateway: { boundChatId?: string },
+  chatId: string,
+  multiChat = false,
+): boolean {
+  // 多会话模式下不做会话级过滤 —— 谁能触达已经由飞书侧的策略管道决定
+  // （dmMode / 白名单 / requireMention），这里再拦一次只会把群 @ 也挡掉
+  if (multiChat) return true;
   return gateway.boundChatId === undefined || gateway.boundChatId === chatId;
 }
 
@@ -175,6 +187,18 @@ interface TurnState {
 
 export class Bridge {
   #turn: TurnState | undefined;
+  /**
+   * 待认领的入站来源，FIFO。转发消息给 pi 时入队，agent_start 时出队。
+   *
+   * pi 的 agent_start 事件不带「是哪条消息触发的」，所以来源只能靠顺序推断。
+   * 顺序在常规路径（含 followUp 排队）上是成立的，但有两处对不上，
+   * 见 docs/broker.md「多会话的来源归属」：
+   *   - 终端自己敲的回合没有来源，出队会拿到 undefined，退回默认收件方
+   *   - 回合中途被另一个对话 steer，输出仍回到最初那个来源
+   */
+  #origins: string[] = [];
+  /** 当前回合的出站目标 */
+  #turnTarget: string | undefined;
   #toolStartedAt = new Map<string, number>();
   /**
    * 操作员点了「本回合全部允许」。只在当前 agent 回合内有效，
@@ -231,9 +255,15 @@ export class Bridge {
     });
   }
 
+  /** 转发入站消息给 pi 之前调用，登记这条消息的来源 */
+  noteInboundOrigin(chatId: string): void {
+    this.#origins.push(chatId);
+  }
+
   startTurn(): void {
     if (this.#turn) return;
     this.#turnApproved = false;
+    this.#turnTarget = this.#origins.shift();
     const stream = new TurnStream();
     const turn: TurnState = {
       stream,
@@ -244,7 +274,7 @@ export class Bridge {
       pumping: Promise.resolve(),
     };
     turn.pumping = this.#gateway
-      .streamTurn(async (sink) => stream.pump(sink))
+      .streamTurn(async (sink) => stream.pump(sink), this.#turnTarget)
       .catch((err) => {
         turn.streamFailed = true;
         this.#log(`飞书流式发送失败，将在回合结束后补发全文：${String(err)}`, "warning");
@@ -307,7 +337,7 @@ export class Bridge {
     // 流式卡片废了（断线/限流/元素超限/收尾超时）时，把全文作为普通消息补发一次
     if (turn.streamFailed && turn.transcript.trim() !== "") {
       try {
-        await this.#gateway.sendText(turn.transcript);
+        await this.#gateway.sendText(turn.transcript, this.#turnTarget);
       } catch (err) {
         this.#log(`补发全文也失败了，本回合内容仅存在于终端：${String(err)}`, "error");
       }
@@ -342,7 +372,7 @@ export class Bridge {
     // 本回合已被整体批准，后续危险调用不再打扰操作员
     if (this.#turnApproved) return undefined;
 
-    const askers: Asker[] = [this.#gateway.cardAsker];
+    const askers: Asker[] = [this.#gateway.askerFor(this.#turnTarget)];
     if (tuiAsker) askers.push(tuiAsker);
 
     let decision: Decision;

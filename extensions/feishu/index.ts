@@ -193,7 +193,7 @@ export default function (pi: ExtensionAPI) {
             return;
           }
 
-          if (!shouldAccept(gw, msg.chatId)) {
+          if (!shouldAccept(gw, msg.chatId, cfg.multiChat)) {
             // 必须显式指定收件会话，否则会发到已绑定的那个会话去
             await gw.sendText("该 pi 会话已绑定到其他对话。", msg.chatId);
             return;
@@ -224,6 +224,8 @@ export default function (pi: ExtensionAPI) {
           const content = await br.toPromptContent(msg);
           const { text, deliverAs } = decideDelivery(content, br.isStreaming);
           if (text === "") return;
+          // 登记来源，agent_start 时按 FIFO 认领 —— pi 的事件不带触发者信息
+          br.noteInboundOrigin(msg.chatId);
           await pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
         } catch (err) {
           log(`处理入站消息失败：${String(err)}`, "error");

@@ -181,20 +181,25 @@ export class FeishuGateway {
     }
   }
 
-  /** 供 requestApproval 使用的飞书通道。卡片的发送/登记/竞速收尾与 broker 档共用 */
-  cardAsker: Asker = async (req, signal) => {
-    const channel = this.#channel;
-    const to = this.#bound;
-    if (!channel || !to) throw new Error("飞书未连接或未绑定会话");
-    return askViaCard({
-      registry: this.#approvals,
-      chatId: to,
-      req,
-      signal,
-      send: async (chatId, card) => (await channel.send(chatId, { card })).messageId,
-      settleCard: (messageId, status) => this.#settleCard(messageId, status),
-    });
-  };
+  /**
+   * 面向指定会话的审批通道。卡片的发送/登记/竞速收尾与 broker 档共用。
+   * to 省略时发往已绑定会话；多会话模式下由 Bridge 传入本回合的来源。
+   */
+  askerFor(to?: string): Asker {
+    return async (req, signal) => {
+      const channel = this.#channel;
+      const target = resolveTarget(this.#bound, to);
+      if (!channel || !target) throw new Error("飞书未连接或未绑定会话");
+      return askViaCard({
+        registry: this.#approvals,
+        chatId: target,
+        req,
+        signal,
+        send: async (chatId, card) => (await channel.send(chatId, { card })).messageId,
+        settleCard: (messageId, status) => this.#settleCard(messageId, status),
+      });
+    };
+  }
 
   async #settleCard(messageId: string, status: string): Promise<void> {
     try {

@@ -200,7 +200,12 @@ export class BrokerGateway implements GatewayLike {
     }
   }
 
-  cardAsker: Asker = async (req, signal): Promise<Decision> => {
+  /**
+   * broker 档下收件方由 broker 的路由表决定（一个会话绑一个对话），
+   * 所以这里用不上 to —— multiChat 是 direct 档的特性，两者不叠加。
+   */
+  askerFor(_to?: string): Asker {
+    return async (req, signal): Promise<Decision> => {
     const id = this.#nextId();
     if (signal.aborted) return { allow: false, reason: "已由其他通道处理" };
     const onAbort = () => this.#post({ t: "ask_cancel", id });
@@ -209,10 +214,11 @@ export class BrokerGateway implements GatewayLike {
       this.#post({ t: "ask", id, toolName: req.toolName, input: req.input });
       const f = (await this.#awaitApproval(id)) as { allow: boolean; reason: string; scope?: "turn" };
       return { allow: f.allow, reason: f.reason, ...(f.scope === "turn" ? { scope: "turn" as const } : {}) };
-    } finally {
-      signal.removeEventListener("abort", onAbort);
-    }
-  };
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+    };
+  }
 
   #onFrame(f: ServerFrame): void {
     switch (f.t) {

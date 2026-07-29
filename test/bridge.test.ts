@@ -78,7 +78,7 @@ function fakeGateway(overrides: Partial<GatewayLike> = {}): GatewayLike {
     async downloadImage() {
       return undefined;
     },
-    cardAsker: async () => ({ allow: false, reason: "未接线" }),
+    askerFor: () => async () => ({ allow: false, reason: "未接线" }),
     ...overrides,
   };
 }
@@ -95,6 +95,7 @@ const CONFIG = {
   bindTarget: "operator",
   pairingTtlMs: 600_000,
   requireMention: true,
+  multiChat: false,
   approvalMode: "balanced" as const,
   denyPatterns: [],
   allowPatterns: [],
@@ -170,7 +171,7 @@ test("gateToolCall：审批通道全挂时 fail-closed", async () => {
   const bridge = new Bridge(
     CONFIG,
     fakeGateway({
-      cardAsker: async () => {
+      askerFor: () => async () => {
         throw new Error("飞书未连接");
       },
     }),
@@ -188,7 +189,7 @@ test("gateToolCall：审批通道全挂时 fail-closed", async () => {
 /** 卡片返回带 scope:"turn" 的批准 */
 const turnApprover = (calls: { n: number }) =>
   fakeGateway({
-    cardAsker: async () => {
+    askerFor: () => async () => {
       calls.n += 1;
       return { allow: true, reason: "飞书批准", scope: "turn" as const };
     },
@@ -223,7 +224,7 @@ test("不带 scope 的普通批准只对当次生效", async () => {
   const bridge = new Bridge(
     CONFIG,
     fakeGateway({
-      cardAsker: async () => {
+      askerFor: () => async () => {
         n += 1;
         return { allow: true, reason: "飞书批准" };
       },
@@ -243,7 +244,7 @@ test("拒绝带 scope 也不会开启豁免 —— 只有批准才算", async ()
   const bridge = new Bridge(
     CONFIG,
     fakeGateway({
-      cardAsker: async () => {
+      askerFor: () => async () => {
         n += 1;
         return { allow: false, reason: "飞书拒绝", scope: "turn" as const };
       },
@@ -359,4 +360,123 @@ test("bindToChat：已绑定时不动它", async () => {
 test("飞书侧也能发 /feishu unbind 解绑", () => {
   assert.deepEqual(parseControlCommand("/feishu unbind"), { kind: "unbind" });
   assert.deepEqual(parseControlCommand("  /feishu   UNBIND "), { kind: "unbind" });
+});
+
+// ── 多会话：一个 pi 会话同时接私聊与群 @，回复回到来源 ──────────────
+
+/** 记录每次出站调用的目标，用来断言「回给了谁」 */
+function targetTrackingGateway(sink: {
+  streams: (string | undefined)[];
+  texts: { text: string; to?: string }[];
+  asks: (string | undefined)[];
+}): GatewayLike {
+  return {
+    bind() {},
+    onMessage() {},
+    async streamTurn(run, to) {
+      sink.streams.push(to);
+      await run({ async append() {} });
+    },
+    async sendText(text, to) {
+      sink.texts.push({ text, to });
+    },
+    async downloadImage() {
+      return undefined;
+    },
+    askerFor(to) {
+      return async () => {
+        sink.asks.push(to);
+        return { allow: false, reason: "未接线" };
+      };
+    },
+  };
+}
+
+const MULTI = { ...CONFIG, multiChat: true };
+
+test("多会话：两个回合分别流回各自的来源", async () => {
+  const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
+  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
+
+  bridge.noteInboundOrigin("oc_dm");
+  bridge.startTurn();
+  await bridge.endTurn();
+
+  bridge.noteInboundOrigin("oc_group");
+  bridge.startTurn();
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_dm", "oc_group"]);
+});
+
+test("终端发起的回合没有来源，流到默认收件方（undefined）", async () => {
+  const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
+  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
+
+  bridge.startTurn(); // 没有 noteInboundOrigin
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, [undefined], "退回网关的默认收件方，而不是乱发给上一个来源");
+});
+
+test("来源按 FIFO 出队，不会串到别的回合", async () => {
+  const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
+  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
+
+  // 两条消息先后排队（followUp 场景），回合再依次开
+  bridge.noteInboundOrigin("oc_a");
+  bridge.noteInboundOrigin("oc_b");
+  bridge.startTurn();
+  await bridge.endTurn();
+  bridge.startTurn();
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_a", "oc_b"]);
+});
+
+test("流式失败时补发的全文也发回同一个来源", async () => {
+  const texts: { text: string; to?: string }[] = [];
+  const gw = targetTrackingGateway({ streams: [], texts, asks: [] });
+  const failing: GatewayLike = {
+    ...gw,
+    async streamTurn() {
+      throw new Error("飞书限流");
+    },
+  };
+  const bridge = new Bridge(MULTI, failing, () => {}, () => 0, 1000);
+
+  bridge.noteInboundOrigin("oc_group");
+  bridge.startTurn();
+  bridge.onTextDelta("结果");
+  await bridge.endTurn();
+
+  assert.equal(texts.at(-1)?.to, "oc_group", "补发全文发错对话，等于把内容漏给别人");
+});
+
+test("审批卡片发到触发该回合的那个对话", async () => {
+  const asks: (string | undefined)[] = [];
+  const bridge = new Bridge(
+    MULTI,
+    targetTrackingGateway({ streams: [], texts: [], asks }),
+    () => {},
+    () => 0,
+    1000,
+  );
+
+  bridge.noteInboundOrigin("oc_group");
+  bridge.startTurn();
+  await bridge.gateToolCall("bash", { command: "rm -rf x" }, undefined);
+
+  assert.deepEqual(asks, ["oc_group"], "审批卡片弹错对话，就是让不相干的人看见并批准");
+});
+
+test("multiChat 关闭时行为不变：仍只认已绑定的那个会话", () => {
+  assert.equal(shouldAccept({ boundChatId: "oc_a" }, "oc_b", false), false);
+  assert.equal(shouldAccept({ boundChatId: "oc_a" }, "oc_a", false), true);
+  assert.equal(shouldAccept({}, "oc_any", false), true, "未绑定时仍接受首条");
+});
+
+test("multiChat 打开时接受任何会话 —— 过滤交给飞书侧的策略管道", () => {
+  assert.equal(shouldAccept({ boundChatId: "oc_a" }, "oc_b", true), true);
+  assert.equal(shouldAccept({}, "oc_whatever", true), true);
 });

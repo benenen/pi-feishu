@@ -109,6 +109,7 @@ const CFG: Config = {
   bindTarget: "operator",
   pairingTtlMs: 600_000,
   requireMention: true,
+  multiChat: false,
   approvalMode: "balanced",
   denyPatterns: [],
   allowPatterns: [],

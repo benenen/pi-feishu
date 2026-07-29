@@ -150,7 +150,7 @@ test("cardAsker 把请求发给 broker 并用回来的裁决 resolve", async () 
 
   const gw = new BrokerGateway(() => {});
   await gw.connect(p, "A", "/a");
-  const d = await gw.cardAsker({ toolName: "bash", input: { command: "rm -rf x" } }, new AbortController().signal);
+  const d = await gw.askerFor()({ toolName: "bash", input: { command: "rm -rf x" } }, new AbortController().signal);
   assert.deepEqual(d, { allow: true, reason: "飞书批准", scope: "turn" });
   await gw.disconnect();
   await b.close();
@@ -218,7 +218,7 @@ test("超时只针对普通请求：审批（ask）可以等人点按钮，不�
 
   const gw = new BrokerGateway(() => {}, 60);
   await gw.connect(p, "A", "/a");
-  const asked = gw.cardAsker({ toolName: "bash", input: {} }, new AbortController().signal);
+  const asked = gw.askerFor()({ toolName: "bash", input: {} }, new AbortController().signal);
   // 远超请求超时之后才有人点按钮
   await new Promise((r) => setTimeout(r, 300));
   answer?.(undefined);

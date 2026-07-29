@@ -30,6 +30,11 @@ export interface Config {
   bindTarget: string;
   /** 配对码有效期。过期即作废，需要重新 /feishu start 或 /feishu pair 签发 */
   pairingTtlMs: number;
+  /**
+   * 一个 pi 会话同时服务多个对话（私聊 + 群 @），回复回到消息来源。
+   * 仅 direct 档有效 —— broker 档下一个会话本就只绑一个对话。
+   */
+  multiChat: boolean;
   requireMention: boolean;
   approvalMode: ApprovalMode;
   /** relaxed 档追加的危险模式（正则源串），加载时已校验可编译 */
@@ -149,6 +154,7 @@ export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Confi
   const autoStart = readBoolean(merged.autoStart, "autoStart", false, problems);
   const autoStartBroker = readBoolean(merged.autoStartBroker, "autoStartBroker", true, problems);
   const requireMention = readBoolean(merged.requireMention, "requireMention", true, problems);
+  const multiChat = readBoolean(merged.multiChat, "multiChat", false, problems);
 
   let dmMode: DmMode = "open";
   if (merged.dmMode !== undefined) {
@@ -274,6 +280,7 @@ export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Confi
     bindTarget,
     pairingTtlMs,
     requireMention,
+    multiChat,
     approvalMode,
     denyPatterns,
     allowPatterns,
