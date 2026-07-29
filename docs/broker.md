@@ -154,10 +154,28 @@ error，然后就停在那里等人。重连、重试队列都留待后续。
 **`bindTarget` 只有 `"code"` 生效。** `operator` / `oc_xxx` / `none` 三档配了也不起作用 ——
 绑定权在 broker 的路由表手里，会话侧没法单方面决定绑谁。
 
-**一个已知的审批边界**：会话绑着 chat X 时弹出的审批卡片，在改绑到 chat Y 之后，X 里那张
-旧卡片**仍可**被 `approverAllowlist` 里的人点「允许」并生效。风险边界是清楚的（仅限已授权
-的审批人、且仅限该会话曾经绑过的对话，不是权限外溢），但知道比不知道好。详见
-`docs/superpowers/plans/2026-07-29-feishu-broker.md` 末尾的遗留项。
+## 已知遗留项
+
+整支分支终审时明确判为「可下一波处理」的三条，记在这里以免丢失：
+
+**1. 换绑后旧审批卡片仍可兑现。** 会话绑着 chat X 时弹出的审批卡片，在改绑到 chat Y 之后，
+X 里那张旧卡片**仍可**被 `approverAllowlist` 里的人点「允许」并生效。`ApprovalRegistry` 现在
+按 chatId 登记，但这张卡片本来就发往 X、来自 X 的点击与登记一致，所以挡不住。
+
+风险边界是清楚的：仅限**已授权的审批人**、且仅限该会话**曾经绑过**的对话 —— 不是权限外溢。
+
+最小修法不是「解绑时撤销全部未决审批」，而是**登记时一并记下发起 ask 的连接 id，settle 时
+复查 `registry.boundChatOf(connId) === event.chatId`** —— `broker/server.ts` 在那个位置已经
+拿得到这个值。
+
+**2. `server.ts` 的 `#send(displaced, {t:"unbound"})` 当前不可达。** `deliver()` 会先命中
+`byChat` 直接投给 owner，轮不到 `matchCode` 分支。`registry.bind()` 返回被顶掉会话 id 这个
+契约本身是对的且有真测试，所以代码该留而不是删 —— 它是给将来放开「已绑对话内换绑」时的
+防御。但调用点缺一句注释说明这一点，目前只写在测试注释里。
+
+**3. `#dispatch` 的 docstring 措辞不精确。** 写的是「带 id 的请求必须收到 ok/err 之一」，
+但 `stream_begin` 的成功路径刻意不回响应（响应挂在 `stream_end` 的同 id 上）。客户端不 await
+它，不会挂起，但注释该说清楚这个例外。
 
 ## 冒烟清单
 

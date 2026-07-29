@@ -159,6 +159,8 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 ## broker 模式（`transport: "broker"`）
 
+> 动手操作看 [`docs/broker.md`](docs/broker.md)：上手步骤、supervisor 托管、排障对照表、冒烟清单。
+
 上一节的前提是「一个飞书应用配一个 pi 会话」，根子在于**同一个 appId 只能有一条长连接**，
 飞书把事件推给哪条不确定。如果你就是想用**同一个飞书应用**同时服务多个 pi 会话（同一个人
 在同一个飞书对话里切换着跟不同项目的会话聊），direct 模式做不到，得换成 broker 模式：
