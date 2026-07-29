@@ -171,6 +171,62 @@ test("连接断开时未决的请求一律 reject，不能永久挂住", async (
   await b.close();
 });
 
+test("broker 收下请求却完全不回应时，客户端超时 reject，不把 agent 回合冻住", async () => {
+  // broker 侧任何一处漏回帧（吞掉异常、被 SIGSTOP、内部 bug），没有超时的话
+  // pending 就永远不会 settle —— bridge.endTurn() 正好 await 它，结果是回合
+  // 永久冻住，只能重启 pi。
+  const p = tmpSock();
+  const b = fakeBroker(p, (f, reply) => {
+    if (f.t === "hello") reply({ t: "hello_ok" });
+    // send_text 故意既不回 ok 也不回 err —— 模拟 broker 把异常吞掉了
+  });
+  await b.listen();
+
+  const gw = new BrokerGateway(() => {}, 120);
+  await gw.connect(p, "A", "/a");
+
+  // 不能直接 await：没修之前这个 promise 永远不 settle，测试会挂死而不是失败。
+  // 用一条独立的看门狗把「挂起」变成一个可断言的结果。
+  const outcome = await Promise.race([
+    gw.sendText("你好").then(
+      () => "resolved",
+      (err: unknown) => `rejected:${String(err)}`,
+    ),
+    new Promise<string>((r) => setTimeout(() => r("hung"), 1500)),
+  ]);
+  // 先收拾干净再断言：断言失败会跳过后面的清理，留着 server/socket 不关，
+  // node:test 会因为句柄没释放而整个挂住 —— 那样连「红」都看不到
+  await gw.disconnect();
+  await b.close();
+  assert.match(outcome, /rejected:.*超时/, `期望超时 reject，实际：${outcome}`);
+});
+
+test("超时只针对普通请求：审批（ask）可以等人点按钮，不受它约束", async () => {
+  // 人点按钮本来就可能超过请求超时；ask 的超时由 approval.ts 的 approvalTimeoutMs
+  // 统一管（超时会 abort，broker 收到 ask_cancel 后照样回 ask_result）。
+  // 在这里也套一个短超时的话，稍慢一点的审批会被误判成通道故障。
+  const p = tmpSock();
+  let answer: ((x: unknown) => void) | undefined;
+  const b = fakeBroker(p, (f, reply) => {
+    if (f.t === "hello") reply({ t: "hello_ok" });
+    if (f.t === "ask") {
+      answer = () => reply({ t: "ask_result", id: f.id, allow: true, reason: "飞书批准" });
+    }
+  });
+  await b.listen();
+
+  const gw = new BrokerGateway(() => {}, 60);
+  await gw.connect(p, "A", "/a");
+  const asked = gw.cardAsker({ toolName: "bash", input: {} }, new AbortController().signal);
+  // 远超请求超时之后才有人点按钮
+  await new Promise((r) => setTimeout(r, 300));
+  answer?.(undefined);
+  assert.deepEqual(await asked, { allow: true, reason: "飞书批准" });
+
+  await gw.disconnect();
+  await b.close();
+});
+
 test("broker 意外断线后 describeBoundChat 自我兜底，返回 undefined 而不是 reject", async () => {
   // 与 sendText/streamTurn 等业务方法不同：describeBoundChat 返回的只是可有
   // 可无的展示名称，状态查询不该因为它失败而整体报错，必须和 FeishuGateway

@@ -159,7 +159,7 @@ export class BrokerServer {
 
     socket.on("data", (chunk: Buffer) => {
       for (const f of conn.reader.push(chunk)) {
-        void this.#safe(() => this.#handle(conn, f as ClientFrame));
+        void this.#dispatch(conn, f as ClientFrame);
       }
     });
     const drop = () => {
@@ -182,6 +182,26 @@ export class BrokerServer {
     };
     socket.on("close", drop);
     socket.on("error", drop);
+  }
+
+  /**
+   * 帧派发的唯一入口。**带 id 的请求必须收到 ok / err 之一**。
+   *
+   * 只记日志不回帧的话，客户端那个 pending 永远不会 settle：`send_text` 撞上
+   * 飞书 429 会让 Bridge.endTurn() 一直等下去，pi 的 agent_end 处理器永不返回，
+   * 整个 agent 回合冻住；`pair_request` 撞上 registry 的「未知会话」则会让
+   * startInner 永不返回，扩展永远卡在「飞书桥接正在启动中」。
+   *
+   * 不带 id 的帧（hello / unbind / ask_cancel）没有请求-响应语义，照旧只记日志。
+   */
+  async #dispatch(conn: Conn, f: ClientFrame): Promise<void> {
+    try {
+      await this.#handle(conn, f);
+    } catch (err) {
+      this.#log(`broker 处理失败：${String(err)}`, "error");
+      const id = (f as { id?: unknown }).id;
+      if (typeof id === "string") this.#send(conn.id, { t: "err", id, message: String(err) });
+    }
   }
 
   async #handle(conn: Conn, f: ClientFrame): Promise<void> {
@@ -217,6 +237,14 @@ export class BrokerServer {
         // channel.stream 是拉模型，这里让它从 TurnStream 拉；
         // 会话推来的 chunk 往同一个 TurnStream 推 —— 现成的推拉适配器跨进程复用
         const done = this.#channel.streamTo(chatId, (sink) => stream.pump(sink));
+        // 立刻标记「这个 rejection 有人管」。streamTo 的失败（限流 / 卡片元素超限 /
+        // 网络抖动）几十毫秒就能到，而 stream_end 要等整个回合跑完（数秒到数分钟）
+        // 才发出 —— 那段窗口里 done 没有任何 handler，Node 会在当前事件循环末尾判定
+        // unhandledRejection，bin/broker.ts 的处理器直接 process.exit(1)：一次普通的
+        // 流式失败打死整个 broker，挂在它上面的所有会话同时失联。
+        // 这只是「标记已处理」，不是吞掉结果 —— 同一个 promise 可以挂多个 handler，
+        // 下面 stream_end 里的 `await entry.done` 照样拿得到这个 rejection。
+        done.catch(() => {});
         conn.streams.set(f.id, { stream, done });
         return;
       }

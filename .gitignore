@@ -39,6 +39,8 @@ build/Release
 
 # Dependency directories
 node_modules/
+# worktree 里 node_modules 是个符号链接，带斜杠的规则只匹配目录、匹配不到它
+node_modules
 jspm_packages/
 
 # Snowpack dependency directory (https://snowpack.dev/)

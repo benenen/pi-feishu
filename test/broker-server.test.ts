@@ -275,6 +275,125 @@ test("连接在流式中途断开：孤儿流不会变成 unhandledRejection", a
   await server.close();
 });
 
+test("流式中途失败但连接没断：done 的 rejection 不能冒成 unhandledRejection", async () => {
+  // 上一条测试靠 sock.destroy() 让 drop() 抢先给 done 挂上 catch，覆盖的是断线路径。
+  // 这一条覆盖**不断线**的普通路径：飞书限流 / 卡片元素超限 / 网络抖动会让 streamTo
+  // 在几十毫秒内 reject，而客户端的 stream_end 要等整个回合跑完（数秒到数分钟）才发出。
+  // 那段窗口里 done 没有任何 handler —— Node 在当前事件循环末尾判定 unhandledRejection，
+  // bin/broker.ts 的处理器直接 process.exit(1)：一次普通的流式失败打死整个 broker，
+  // 挂在它上面的所有会话同时失联。
+  const channel: BrokerChannelLike = {
+    async sendText() {},
+    async streamTo(_chatId, run) {
+      // 失败与 pump 是否收尾无关 —— 真实网络里底层连接失败不会等本地缓冲区排空
+      void run({ append: async () => {} });
+      await new Promise<void>((_resolve, reject) => {
+        setTimeout(() => reject(new Error("飞书限流，流式发送失败")), 20);
+      });
+    },
+    async askCard() {
+      return { allow: false, reason: "假通道" };
+    },
+    async downloadImage() {
+      return undefined;
+    },
+    async describeChat() {
+      return "假会话";
+    },
+  };
+
+  let rejections = 0;
+  const onUnhandledRejection = () => {
+    rejections += 1;
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+
+  const server = new BrokerServer({ channel, pairingTtlMs: 600_000, log: () => {} });
+  const p = tmpSock();
+  await server.listen(p);
+  const c = await connect(p);
+  c.send({ t: "hello", cwd: "/w", label: "A" });
+  await c.waitFor("hello_ok");
+  c.send({ t: "pair_request", id: "1" });
+  const code = (await c.waitFor("pair_code")) as { code: string };
+  server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+  await c.waitFor("bound");
+
+  try {
+    c.send({ t: "stream_begin", id: "s" });
+    c.send({ t: "stream_chunk", id: "s", text: "写到一半" });
+    // 连接**不断**，只是回合还没结束：模拟长回合里 stream_end 迟迟不来
+    await new Promise((r) => setTimeout(r, 120));
+
+    process.removeListener("unhandledRejection", onUnhandledRejection);
+    assert.equal(rejections, 0, "回合进行中的流式失败必须已被标记处理，不能打死 broker");
+
+    // 标记已处理不等于吞掉结果：stream_end 到达时仍要把失败如实告诉客户端，
+    // 否则 bridge 会以为流式成功而不补发全文
+    c.send({ t: "stream_end", id: "s" });
+    const err = (await c.waitFor("err")) as { message: string };
+    assert.match(err.message, /飞书限流/);
+  } finally {
+    // 断言失败也必须收拾干净：留着 socket/server 不关，node:test 会因为句柄
+    // 没释放而整个挂住 —— 那样连「红」都看不到
+    process.removeListener("unhandledRejection", onUnhandledRejection);
+    c.sock.destroy();
+    await server.close();
+  }
+});
+
+test("channel 抛错时回 err —— 既不回 ok 也不回 err 会让客户端永久挂起", async () => {
+  // send_text 里 await channel.sendText() 一旦 reject（飞书 429 / 参数错 / 网络抖），
+  // 客户端那个 promise 永不 settle：Bridge.endTurn() 的补发全文那步会一直等下去，
+  // pi 的 agent_end 处理器永不返回，整个回合冻住。
+  const channel: BrokerChannelLike = {
+    ...fakeChannel([]),
+    async sendText() {
+      throw new Error("飞书 API 429");
+    },
+  };
+  const server = new BrokerServer({ channel, pairingTtlMs: 600_000, log: () => {} });
+  const p = tmpSock();
+  await server.listen(p);
+  const c = await connect(p);
+  c.send({ t: "hello", cwd: "/w", label: "A" });
+  await c.waitFor("hello_ok");
+  c.send({ t: "pair_request", id: "1" });
+  const code = (await c.waitFor("pair_code")) as { code: string };
+  server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+  await c.waitFor("bound");
+
+  try {
+    c.send({ t: "send_text", id: "9", markdown: "结果" });
+    const err = (await c.waitFor("err")) as { id: string; message: string };
+    assert.equal(err.id, "9", "err 必须带回请求的 id，否则客户端认不出是哪个 pending");
+    assert.match(err.message, /429/);
+  } finally {
+    c.sock.destroy();
+    await server.close();
+  }
+});
+
+test("registry 抛错的请求同样要回 err —— 否则 requestPairingCode 永久挂起", async () => {
+  // 没 hello 就 pair_request：registry.issueCode 对未知会话 throw。
+  // 这条路径不回帧的话，扩展侧 startInner 里的 requestPairingCode() 永不返回，
+  // 会话永远卡在「飞书桥接正在启动中」。
+  const server = new BrokerServer({ channel: fakeChannel([]), pairingTtlMs: 600_000, log: () => {} });
+  const p = tmpSock();
+  await server.listen(p);
+  const c = await connect(p);
+
+  try {
+    c.send({ t: "pair_request", id: "7" });
+    const err = (await c.waitFor("err")) as { id: string; message: string };
+    assert.equal(err.id, "7");
+    assert.match(err.message, /未知会话/);
+  } finally {
+    c.sock.destroy();
+    await server.close();
+  }
+});
+
 test("形状不对的畸形帧被静默忽略，不影响后续正常帧", async () => {
   // protocol.ts 的 FrameReader 只做 JSON.parse + 类型断言，不做运行时校验，
   // 所以 `42`、`{"t":"不存在的类型"}` 这类合法 JSON 但不是 Frame 的行会被当成
