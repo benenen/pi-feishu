@@ -94,11 +94,12 @@ export class BrokerServer {
     const paired = this.#registry.matchCode(msg.text);
     if (paired) {
       this.#registry.bind(paired.id, msg.chatId);
-      // 绑定成功只通过 bound 帧通知会话本身，不在这里直接向飞书发确认文本：
-      // 这条消息和会话随后自己发的内容会共用同一条出站通道（同一个 chatId），
-      // 在真实 channel 里是时序竞争，在测试用的同步假通道里则是确定性地污染
-      // 顺序——回执交给会话自己决定要不要发，broker 只管路由。
       this.#send(paired.id, { t: "bound", chatId: msg.chatId });
+      // 单会话版 index.ts 在绑定成功时会给飞书发确认，broker 版沿用同样的体验：
+      // 用户输完配对码得有反馈，不能指望会话自己记得回一句。
+      void this.#safe(() =>
+        this.#channel.sendText(msg.chatId, `配对成功，本对话已绑定 pi 会话：${paired.label}`),
+      );
       return;
     }
 
@@ -119,6 +120,19 @@ export class BrokerServer {
     });
     const drop = () => {
       for (const a of conn.asks.values()) a.abort();
+      // 连接断开时 stream_end 永远不会再来了：
+      // - 不调用 finish()，pump() 会永远卡在 await new Promise(...)，飞书那条流式
+      //   消息永远处于未完成状态；
+      // - 不给 entry.done 挂 catch，它之后一旦 reject（真实网络里完全会发生，比如
+      //   飞书流式调用中途抖动）就是 unhandledRejection，直接打死整个 broker 进程。
+      // 所以两件事都要做：让 pump 收尾，并兜住 done 的 rejection。
+      for (const entry of conn.streams.values()) {
+        entry.stream.finish();
+        entry.done.catch((err) => {
+          this.#log(`连接断开后流式收尾失败（已忽略）：${String(err)}`, "error");
+        });
+      }
+      conn.streams.clear();
       this.#registry.remove(id);
       this.#conns.delete(id);
     };
@@ -163,14 +177,27 @@ export class BrokerServer {
         return;
       }
 
-      case "stream_chunk":
-        conn.streams.get(f.id)?.stream.push(f.text);
+      case "stream_chunk": {
+        const entry = conn.streams.get(f.id);
+        if (!entry) {
+          // 正常客户端不会走到这：要么 id 打错了，要么 stream_end/断线清理已经跑过。
+          // 协议层没有其他排查手段，至少留一行日志。
+          this.#log(`收到未知流的 stream_chunk（id=${f.id}），已丢弃`, "warning");
+          return;
+        }
+        entry.stream.push(f.text);
         return;
+      }
 
       case "stream_end": {
         const entry = conn.streams.get(f.id);
         conn.streams.delete(f.id);
-        if (!entry) return this.#send(conn.id, { t: "ok", id: f.id });
+        if (!entry) {
+          // 静默回 ok 会让客户端误以为发送成功；先记一条 warning 留痕，再照旧回 ok
+          // 保持协议对客户端的可预期性（stream_end 总有响应）。
+          this.#log(`收到未知流的 stream_end（id=${f.id}），已丢弃`, "warning");
+          return this.#send(conn.id, { t: "ok", id: f.id });
+        }
         entry.stream.finish();
         try {
           await entry.done;

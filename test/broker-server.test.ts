@@ -169,6 +169,28 @@ test("会话断开后，它绑的 chat 变成未绑定", async () => {
   await server.close();
 });
 
+test("配对成功会给该 chat 发一句确认文案，不能让用户输完码没有任何反馈", async () => {
+  const sent: Array<{ chatId: string; text: string }> = [];
+  const server = new BrokerServer({ channel: fakeChannel(sent), pairingTtlMs: 600_000, log: () => {} });
+  const p = tmpSock();
+  await server.listen(p);
+  const c = await connect(p);
+  c.send({ t: "hello", cwd: "/w", label: "A" });
+  await c.waitFor("hello_ok");
+  c.send({ t: "pair_request", id: "1" });
+  const code = (await c.waitFor("pair_code")) as { code: string };
+
+  server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+  await c.waitFor("bound");
+
+  const confirm = sent.find((s) => s.chatId === "oc_1");
+  assert.ok(confirm, "应该给绑定的 chat 发一句配对成功的确认");
+  assert.ok(confirm?.text.includes("配对成功"));
+
+  c.sock.destroy();
+  await server.close();
+});
+
 test("流式：begin/chunk/end 依次转成 channel 的 append", async () => {
   const sent: Array<{ chatId: string; text: string }> = [];
   const server = new BrokerServer({ channel: fakeChannel(sent), pairingTtlMs: 600_000, log: () => {} });
@@ -181,6 +203,9 @@ test("流式：begin/chunk/end 依次转成 channel 的 append", async () => {
   const code = (await c.waitFor("pair_code")) as { code: string };
   server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
   await c.waitFor("bound");
+  // 绑定成功会往 sent 里塞一条确认文案（见上一个测试）；这里只关心流式本身，
+  // 清空掉避免两个各自独立的行为互相污染断言。
+  sent.length = 0;
 
   c.send({ t: "stream_begin", id: "s" });
   c.send({ t: "stream_chunk", id: "s", text: "前半" });
@@ -190,6 +215,63 @@ test("流式：begin/chunk/end 依次转成 channel 的 append", async () => {
   assert.equal(sent.map((x) => x.text).join(""), "前半后半");
 
   c.sock.destroy();
+  await server.close();
+});
+
+test("连接在流式中途断开：孤儿流不会变成 unhandledRejection", async () => {
+  // 关键点：streamTo 的失败要设计成与 run(sink)/pump 是否收尾无关 —— 真实网络里，
+  // 底层连接失败不会等本地缓冲区排空。如果这里写成 `await run(sink); throw ...`，
+  // 那么在没打这个补丁之前 pump() 会永远卡住（没人再 push/finish），streamTo 的
+  // promise 也就永远不会走到 throw 这一步、永远不会 reject —— 测试会因为
+  // "根本没发生 reject" 而假绿，测不出 unhandledRejection 这个症状。
+  // 所以用一个独立的定时器模拟"断线之后过一会儿才失败"，不依赖 pump 是否结束。
+  const channel: BrokerChannelLike = {
+    async sendText() {},
+    async streamTo(_chatId, run) {
+      void run({ append: async () => {} });
+      await new Promise<void>((_resolve, reject) => {
+        setTimeout(() => reject(new Error("连接抖动导致流式发送失败")), 20);
+      });
+    },
+    async askCard() {
+      return { allow: false, reason: "假通道" };
+    },
+    async downloadImage() {
+      return undefined;
+    },
+    async describeChat() {
+      return "假会话";
+    },
+  };
+
+  let rejections = 0;
+  const onUnhandledRejection = () => {
+    rejections += 1;
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+
+  const server = new BrokerServer({ channel, pairingTtlMs: 600_000, log: () => {} });
+  const p = tmpSock();
+  await server.listen(p);
+  const c = await connect(p);
+  c.send({ t: "hello", cwd: "/w", label: "A" });
+  await c.waitFor("hello_ok");
+  c.send({ t: "pair_request", id: "1" });
+  const code = (await c.waitFor("pair_code")) as { code: string };
+  server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+  await c.waitFor("bound");
+
+  c.send({ t: "stream_begin", id: "s" });
+  c.send({ t: "stream_chunk", id: "s", text: "写到一半" });
+  // 不等 stream_end，直接断线 —— stream_end 永远不会再来了
+  c.sock.destroy();
+
+  // 给 streamTo 的假失败和 drop() 的清理都留够时间跑完
+  await new Promise((r) => setTimeout(r, 100));
+
+  process.removeListener("unhandledRejection", onUnhandledRejection);
+  assert.equal(rejections, 0, "孤儿流的 rejection 必须被 drop() 兜住，不能冒成 unhandledRejection");
+
   await server.close();
 });
 
@@ -211,6 +293,38 @@ test("形状不对的畸形帧被静默忽略，不影响后续正常帧", async
   c.send({ t: "hello", cwd: "/w", label: "A" });
   await c.waitFor("hello_ok");
   assert.equal(server.sessionCount, 1);
+
+  c.sock.destroy();
+  await server.close();
+});
+
+test("孤儿 stream_chunk / stream_end 各留一条 warning，stream_end 仍照常回 ok", async () => {
+  const logs: Array<{ msg: string; level?: string }> = [];
+  const server = new BrokerServer({
+    channel: fakeChannel([]),
+    pairingTtlMs: 600_000,
+    log: (msg, level) => void logs.push({ msg, level }),
+  });
+  const p = tmpSock();
+  await server.listen(p);
+  const c = await connect(p);
+  c.send({ t: "hello", cwd: "/w", label: "A" });
+  await c.waitFor("hello_ok");
+
+  // 没发过 stream_begin，这个 id 从一开始就是野的（id 打错，或 stream_end/断线
+  // 清理已经跑过）——静默丢弃排查起来会很痛苦，至少要留痕
+  c.send({ t: "stream_chunk", id: "野id", text: "没人接" });
+  c.send({ t: "stream_end", id: "野id" });
+  await c.waitFor("ok"); // stream_end 依然要回 ok，不能让客户端以为发送失败
+
+  assert.ok(
+    logs.some((l) => l.msg.includes("stream_chunk") && l.msg.includes("野id")),
+    "孤儿 stream_chunk 要留痕",
+  );
+  assert.ok(
+    logs.some((l) => l.msg.includes("stream_end") && l.msg.includes("野id")),
+    "孤儿 stream_end 要留痕",
+  );
 
   c.sock.destroy();
   await server.close();
