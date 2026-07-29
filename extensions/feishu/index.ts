@@ -410,7 +410,20 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_start", (_event, ctx) => {
     // 来源从会话条目里解析 —— pi 的 agent_start 不带触发者信息，而会话条目
     // 记录的是它实际处理消息的顺序
-    bridge?.startTurn(resolveOrigin(ctx.sessionManager.getEntries()));
+    const entries = ctx.sessionManager.getEntries();
+    const origin = resolveOrigin(entries);
+    // 诊断：条目尾巴能直接看出来源条目在不在、位置对不对
+    const tail = entries
+      .slice(-6)
+      .map((e) => {
+        const x = e as { type?: string; customType?: string; message?: { role?: string } };
+        if (x.type === "custom") return `custom:${x.customType}`;
+        if (x.type === "message") return `msg:${x.message?.role}`;
+        return String(x.type);
+      })
+      .join(" → ");
+    log(`回合开始，来源=${origin ?? "无（走默认收件方）"}；条目尾巴：${tail}`);
+    bridge?.startTurn(origin);
   });
 
   pi.on("message_update", (event) => {

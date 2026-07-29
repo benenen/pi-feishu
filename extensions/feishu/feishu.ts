@@ -125,6 +125,7 @@ export class FeishuGateway {
   async streamTurn(run: (sink: AppendSink) => Promise<void>, to?: string): Promise<void> {
     const channel = this.#channel;
     const target = resolveTarget(this.#bound, to);
+    this.#log(`流式发往 ${target ?? "(无)"}（本回合来源=${to ?? "无"}，默认=${this.#bound ?? "无"}）`);
     if (!channel || !target) return;
     await channel.stream(target, { markdown: async (controller) => run(controller) });
   }
@@ -133,6 +134,7 @@ export class FeishuGateway {
   async sendText(markdown: string, to?: string): Promise<void> {
     const channel = this.#channel;
     const target = resolveTarget(this.#bound, to);
+    this.#log(`发文本到 ${target ?? "(无)"}（显式收件方=${to ?? "无"}，默认=${this.#bound ?? "无"}）`);
     if (!channel || !target) return;
     await channel.send(target, { markdown });
   }
