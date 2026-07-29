@@ -191,12 +191,15 @@ export class Bridge {
    * 待认领的入站来源，FIFO。转发消息给 pi 时入队，agent_start 时出队。
    *
    * pi 的 agent_start 事件不带「是哪条消息触发的」，所以来源只能靠顺序推断。
-   * 顺序在常规路径（含 followUp 排队）上是成立的，但有两处对不上，
-   * 见 docs/broker.md「多会话的来源归属」：
-   *   - 终端自己敲的回合没有来源，出队会拿到 undefined，退回默认收件方
-   *   - 回合中途被另一个对话 steer，输出仍回到最初那个来源
+   * 要让顺序成立，**一个回合必须恰好对应一个槽位**：
+   *   - steer 消息不产生新回合，因此不入队（由 index.ts 判断后决定调不调）
+   *   - 终端输入在空闲时会立刻开一个回合，因此要入队一个 undefined 占位
+   *
+   * 仍有一处对不上：流式进行中的终端输入被 pi 排成 followUp 时会晚一步开回合，
+   * 而此刻分不清它是 steer 还是 followUp，所以不入队 —— 那个回合会认领掉一个
+   * 飞书来源。见 docs/direct.md「来源归属会在哪里对不上」。
    */
-  #origins: string[] = [];
+  #origins: (string | undefined)[] = [];
   /** 当前回合的出站目标 */
   #turnTarget: string | undefined;
   #toolStartedAt = new Map<string, number>();
@@ -283,6 +286,12 @@ export class Bridge {
   }
 
   onUserPrompt(text: string, source: "interactive" | "feishu"): void {
+    // 终端输入在空闲时会立刻开一个回合，它必须占掉一个来源槽位 ——
+    // 否则它会认领走排在前面的飞书来源，把终端的输出发进那个对话，
+    // 而飞书那条消息的回合发现队列空了，回落到默认收件方（先前绑定的会话）。
+    // 症状就是「私聊里发的消息，回复出现在之前配对好的群里」。
+    if (source === "interactive" && !this.isStreaming) this.#origins.push(undefined);
+
     const rendered = renderUserPrompt(text, source);
     if (rendered !== null) this.#push(rendered);
   }

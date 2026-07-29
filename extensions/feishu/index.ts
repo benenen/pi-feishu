@@ -224,8 +224,9 @@ export default function (pi: ExtensionAPI) {
           const content = await br.toPromptContent(msg);
           const { text, deliverAs } = decideDelivery(content, br.isStreaming);
           if (text === "") return;
-          // 登记来源，agent_start 时按 FIFO 认领 —— pi 的事件不带触发者信息
-          br.noteInboundOrigin(msg.chatId);
+          // 登记来源，agent_start 时按 FIFO 认领 —— pi 的事件不带触发者信息。
+          // steer 是插进当前回合、不开新回合的，入队会让之后每个回合都错位一个
+          if (deliverAs !== "steer") br.noteInboundOrigin(msg.chatId);
           await pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
         } catch (err) {
           log(`处理入站消息失败：${String(err)}`, "error");
