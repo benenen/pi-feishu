@@ -6,7 +6,9 @@ import { isInvalidEmojiError } from "./reaction.ts";
 import type { AppendSink } from "./turn-stream.ts";
 import type { Asker } from "./approval.ts";
 import type { Config } from "./config.ts";
+import type { GatewayLike } from "./bridge.ts";
 import type { InboundMessage } from "./types.ts";
+import { ChatNameCache, toInbound } from "./inbound.ts";
 import {
   ApprovalRegistry,
   askViaCard,
@@ -17,11 +19,15 @@ import {
 
 export type { InboundMessage } from "./types.ts";
 
-export class FeishuGateway {
+export class FeishuGateway implements GatewayLike {
   #channel: LarkChannel | undefined;
   #bound: string | undefined;
   #messageHandler: ((msg: InboundMessage) => void) | undefined;
   #approvals = new ApprovalRegistry();
+  #chatNames = new ChatNameCache(
+    async (chatId) => this.#channel?.getChatInfo(chatId),
+    (msg, level) => this.#log(msg, level),
+  );
 
   // strip-only 模式不支持构造函数参数属性，依赖写成显式字段
   readonly #config: Config;
@@ -70,14 +76,11 @@ export class FeishuGateway {
       loggerLevel: LoggerLevel.warn,
     });
 
-    channel.on("message", (msg) => {
-      this.#messageHandler?.({
-        messageId: msg.messageId,
-        chatId: msg.chatId,
-        senderId: msg.senderId,
-        text: msg.content,
-        imageKeys: msg.resources.filter((r) => r.type === "image").map((r) => r.fileKey),
-      });
+    // 群名要单独查一次，所以这个 handler 是异步的。resolve 绝不 reject，
+    // 也绝不打乱同一对话的消息顺序 —— 两条保证都在 ChatNameCache 里
+    channel.on("message", async (msg) => {
+      const chatName = await this.#chatNames.resolve(msg.chatId, msg.chatType);
+      this.#messageHandler?.(toInbound(msg, chatName));
     });
 
     // 解析 / 鉴权 / 兑现全在 approval-card.ts 的 handleCardAction 里，

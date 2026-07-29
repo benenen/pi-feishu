@@ -1,5 +1,6 @@
 import type { Config } from "./config.ts";
 import { gateInbound } from "./gate.ts";
+import type { InboundMessage } from "./types.ts";
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const total = Math.round(ms / 1000);
@@ -83,6 +84,20 @@ export function renderNotice(text: string): string {
 export function chatLabel(info: { name?: string; chatType?: "p2p" | "group" }): string {
   if (info.name) return info.name;
   return info.chatType === "p2p" ? "私聊" : "群聊";
+}
+
+/**
+ * 入站消息的一行日志。名字和 id 都给：名字用来认人，id 用来往
+ * groupAllowlist / approverAllowlist 里粘 —— 所以 id 绝不截断。
+ */
+export function describeInbound(msg: InboundMessage): string {
+  const chat = msg.chatName ? `${plain(msg.chatName, 30)}(${msg.chatId})` : msg.chatId;
+  const sender = msg.senderName ? `${plain(msg.senderName, 20)}(${msg.senderId})` : msg.senderId;
+  const parts = [`收到消息：${chat} ← ${sender}`];
+  const text = flatten(msg.text, 60);
+  if (text !== "") parts.push(text);
+  if (msg.imageKeys.length > 0) parts.push(`${msg.imageKeys.length} 张图`);
+  return parts.join(" · ");
 }
 
 export interface StatusInfo {

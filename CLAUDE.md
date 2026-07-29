@@ -39,7 +39,10 @@ pi 事件 (agent_start / message_update / tool_execution_*) ──►│
 |---|---|
 | `index.ts` | **只做接线**。注册 `pi.on(...)` 与 `/feishu` 命令，持有 gateway/bridge 的生命周期。工厂函数里绝不启动后台资源，只声明 |
 | `bridge.ts` | 编排层。回合状态机（`startTurn`/`endTurn`）、工具调用闸门（`gateToolCall`）、入站消息转 prompt |
-| `feishu.ts` | 飞书网关。包住 `createLarkChannel`，收敛 SDK 的事件与出站 API |
+| `feishu.ts` | 飞书网关（direct 档）。包住 `createLarkChannel`，收敛 SDK 的事件与出站 API |
+| `inbound.ts` | SDK 消息 → `InboundMessage` 的映射，以及会话名称缓存。direct/broker 两档共用 |
+| `gate.ts` | 入站放行判定（`gateInbound`）。无依赖，bridge 与 renderer 共用同一份状态机 |
+| `broker/` | broker 档。`gateway.ts` 是会话侧客户端，其余（`server`/`channel`/`registry`/`protocol`）跑在 broker 进程里 |
 | `risk.ts` | 安全判定。三档模型，详见下方 |
 | `approval.ts` | 多通道审批竞速（飞书卡片 vs 终端对话框），先到先得 |
 | `approval-card.ts` | 卡片构造/解析 + 未决审批登记表 |
@@ -72,6 +75,16 @@ pi 的 TUI 不接管 stderr，`console.error` 会直接打进渲染区（光标�
 `feishu.ts` 的 `streamTurn`/`sendText` 刻意**不**自我包含异常（会 reject）。
 `bridge.ts` 侧统一兜底 —— 任何 gateway 调用的 rejection 都不能逃进 pi 的事件循环。
 新增 gateway 调用点时，照着现有四处的写法包好。
+
+### `implements GatewayLike` 挡不住「少写一个可选参数」
+
+两个网关都声明了 `implements GatewayLike`，但 TypeScript 的方法参数是可以**少**的：
+接口写 `streamTurn(run, to?)`，实现写成 `streamTurn(run)` 照样通过编译，多传的
+实参被静默丢掉。群里 @ 的回复一路发到私聊，就是这么来的 —— 接口和调用方都改了，
+实现没改，全绿。
+
+所以 `test/gateway-arity.test.ts` 用 `Function.length` 兜这一类。改 `GatewayLike`
+的签名时，两个实现都要跟着改，并给新参数补一条 arity 断言。
 
 ### 安全闸门一律 fail-closed
 

@@ -14,6 +14,7 @@ import {
 } from "../approval-card.ts";
 import type { BrokerChannelLike } from "./server.ts";
 import type { InboundMessage } from "../types.ts";
+import { ChatNameCache, toInbound } from "../inbound.ts";
 
 /**
  * 与 FeishuGateway 的区别：**不持有 bound 概念**。broker 服务所有对话，
@@ -23,6 +24,10 @@ export class BrokerChannel implements BrokerChannelLike {
   #channel: LarkChannel | undefined;
   #messageHandler: ((msg: InboundMessage) => void) | undefined;
   #approvals = new ApprovalRegistry();
+  #chatNames = new ChatNameCache(
+    async (chatId) => this.#channel?.getChatInfo(chatId),
+    (msg, level) => this.#log(msg, level),
+  );
 
   readonly #config: Config;
   readonly #log: LogFn;
@@ -55,14 +60,10 @@ export class BrokerChannel implements BrokerChannelLike {
       loggerLevel: LoggerLevel.warn,
     });
 
-    channel.on("message", (msg) => {
-      this.#messageHandler?.({
-        messageId: msg.messageId,
-        chatId: msg.chatId,
-        senderId: msg.senderId,
-        text: msg.content,
-        imageKeys: msg.resources.filter((r) => r.type === "image").map((r) => r.fileKey),
-      });
+    // 与 direct 档共用 toInbound / ChatNameCache，见 inbound.ts
+    channel.on("message", async (msg) => {
+      const chatName = await this.#chatNames.resolve(msg.chatId, msg.chatType);
+      this.#messageHandler?.(toInbound(msg, chatName));
     });
 
     // 与 direct 档共用 handleCardAction —— 这段安全代码曾经是两份副本，

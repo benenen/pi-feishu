@@ -22,7 +22,16 @@ export type ServerFrame =
   | { t: "pair_code"; id: string; code: string; expiresAt: number }
   | { t: "bound"; chatId: string }
   | { t: "unbound" }
-  | { t: "message"; messageId: string; chatId: string; senderId: string; text: string; imageKeys: string[] }
+  | {
+      t: "message";
+      messageId: string;
+      chatId: string;
+      chatName?: string;
+      senderId: string;
+      senderName?: string;
+      text: string;
+      imageKeys: string[];
+    }
   | { t: "ask_result"; id: string; allow: boolean; reason: string; scope?: "turn" }
   | { t: "ok"; id: string }
   | { t: "err"; id: string; message: string }

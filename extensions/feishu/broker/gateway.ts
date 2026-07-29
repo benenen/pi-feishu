@@ -1,10 +1,10 @@
 import net from "node:net";
-import { encodeFrame, FrameReader, type ClientFrame, type ServerFrame } from "./broker/protocol.ts";
-import type { AppendSink } from "./turn-stream.ts";
-import type { GatewayLike } from "./bridge.ts";
-import type { InboundMessage } from "./types.ts";
-import type { Asker, Decision } from "./approval.ts";
-import type { LogFn } from "./log.ts";
+import { encodeFrame, FrameReader, type ClientFrame, type ServerFrame } from "./protocol.ts";
+import type { AppendSink } from "../turn-stream.ts";
+import type { GatewayLike } from "../bridge.ts";
+import type { InboundMessage } from "../types.ts";
+import type { Asker, Decision } from "../approval.ts";
+import type { LogFn } from "../log.ts";
 
 interface Pending {
   resolve: (f: ServerFrame) => void;
@@ -237,7 +237,9 @@ export class BrokerGateway implements GatewayLike {
         this.#messageHandler?.({
           messageId: f.messageId,
           chatId: f.chatId,
+          chatName: f.chatName,
           senderId: f.senderId,
+          senderName: f.senderName,
           text: f.text,
           imageKeys: f.imageKeys,
         });

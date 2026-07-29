@@ -13,6 +13,7 @@ import {
   chatLabel,
   renderStatus,
   renderUnbindNotice,
+  describeInbound,
 } from "../extensions/feishu/renderer.ts";
 
 test("formatDuration 分档", () => {
@@ -358,4 +359,49 @@ test("status：不走配对码的档位，未绑定时说下一条消息会绑",
     pairingPending: false,
   });
   assert.match(out, /下一条/);
+});
+
+const INBOUND = {
+  messageId: "om_1",
+  chatId: "oc_31df8f02",
+  senderId: "ou_a1b2",
+  text: "你好",
+  imageKeys: [] as string[],
+};
+
+test("入站日志：名字和 id 都要给 —— 名字用来认人，id 用来配白名单", () => {
+  const out = describeInbound({ ...INBOUND, chatName: "后端组", senderName: "张三" });
+  assert.match(out, /后端组/);
+  assert.match(out, /张三/);
+  assert.match(out, /oc_31df8f02/, "少了 chatId，用户没法把这个对话加进 groupAllowlist");
+  assert.match(out, /ou_a1b2/, "少了 senderId，用户没法把这个人加进 approverAllowlist");
+});
+
+test("入站日志：id 不能被截断 —— 半个 id 复制进配置就是错的", () => {
+  const chatId = `oc_${"f".repeat(40)}`;
+  const out = describeInbound({ ...INBOUND, chatId, chatName: "后端组" });
+  assert.ok(out.includes(chatId), `id 被截断了：${out}`);
+});
+
+test("入站日志：查不到名字时只显示 id，不留空括号", () => {
+  const out = describeInbound(INBOUND);
+  assert.match(out, /oc_31df8f02/);
+  assert.equal(/\(\s*\)/.test(out), false, `留下了空括号：${out}`);
+});
+
+test("入站日志：正文压平换行并截断 —— 一条消息刷屏会把日志区淹掉", () => {
+  const out = describeInbound({ ...INBOUND, text: `第一行\n第二行\n${"啊".repeat(200)}` });
+  assert.equal(out.includes("\n"), false, "日志带换行就不是一行了");
+  assert.ok(Array.from(out).length < 160, `太长了（${Array.from(out).length}）：${out}`);
+});
+
+test("入站日志：带图时说明张数", () => {
+  const out = describeInbound({ ...INBOUND, imageKeys: ["k1", "k2"] });
+  assert.match(out, /2 张图/);
+});
+
+test("入站日志：纯图片消息不留一段空正文", () => {
+  const out = describeInbound({ ...INBOUND, text: "   ", imageKeys: ["k1"] });
+  assert.equal(/·\s*·/.test(out), false, `出现了空的正文段：${out}`);
+  assert.match(out, /1 张图/);
 });

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FeishuGateway } from "../extensions/feishu/feishu.ts";
-import { BrokerGateway } from "../extensions/feishu/broker-gateway.ts";
+import { BrokerGateway } from "../extensions/feishu/broker/gateway.ts";
 
 /**
  * TypeScript 抓不到「实现比接口少声明一个参数」——参数更少的函数可以赋值给

@@ -4,7 +4,7 @@ import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { BrokerGateway } from "../extensions/feishu/broker-gateway.ts";
+import { BrokerGateway } from "../extensions/feishu/broker/gateway.ts";
 import { encodeFrame, FrameReader, type ClientFrame } from "../extensions/feishu/broker/protocol.ts";
 
 function tmpSock(): string {

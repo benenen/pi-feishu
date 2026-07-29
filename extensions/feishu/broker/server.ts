@@ -138,7 +138,9 @@ export class BrokerServer {
         t: "message",
         messageId: msg.messageId,
         chatId: msg.chatId,
+        chatName: msg.chatName,
         senderId: msg.senderId,
+        senderName: msg.senderName,
         text: msg.text,
         imageKeys: msg.imageKeys,
       });

@@ -7,7 +7,7 @@ import { createLogger } from "./log.ts";
 import { FeishuGateway } from "./feishu.ts";
 import net from "node:net";
 import { spawn } from "node:child_process";
-import { BrokerGateway } from "./broker-gateway.ts";
+import { BrokerGateway } from "./broker/gateway.ts";
 import { ensureBroker } from "./broker/ensure.ts";
 import {
   announceAndBind,
@@ -18,7 +18,7 @@ import {
   parseControlCommand,
   shouldAccept,
 } from "./bridge.ts";
-import { renderStatus, renderUnbindNotice } from "./renderer.ts";
+import { describeInbound, renderStatus, renderUnbindNotice } from "./renderer.ts";
 import { createPairing, type Pairing } from "./pairing.ts";
 import type { Asker } from "./approval.ts";
 
@@ -211,7 +211,7 @@ export default function (pi: ExtensionAPI) {
             await gw.sendText("该 pi 会话已绑定到其他对话。", msg.chatId);
             return;
           }
-          log(`收到消息：chatId=${msg.chatId} senderId=${msg.senderId}`);
+          log(describeInbound(msg));
           if (gw.boundChatId === undefined) gw.bind(msg.chatId);
 
           const control = parseControlCommand(msg.text);
