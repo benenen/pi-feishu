@@ -317,3 +317,45 @@ test("unbind 回执：broker 档不会自动签发新码，必须告诉用户回
   const direct = renderUnbindNotice("direct");
   assert.match(direct, /下一条消息会重新绑定/);
 });
+
+test("status：multiChat 下未绑定不该说「等待配对」—— 它根本不要求配对", () => {
+  const out = renderStatus({
+    running: true,
+    config: { ...CFG, multiChat: true, bindTarget: "code" },
+    pairingPending: true, // 码签发过，但 multiChat 下用不上
+  });
+  assert.equal(out.includes("等待配对"), false, "文案说要配对，实际下一条消息就会绑上 —— 对不上");
+  assert.match(out, /下一条/, "该说明下一条通过策略的消息就会绑定");
+});
+
+test("status：配对码过期后不该说「下一条消息会绑定它」—— 它已经绑不上了", () => {
+  const out = renderStatus({
+    running: true,
+    config: { ...CFG, multiChat: false, bindTarget: "code" },
+    pairingPending: false, // 过期或从未签发
+  });
+  assert.equal(
+    out.includes("下一条通过策略的消息会绑定它"),
+    false,
+    "过期后所有消息都会被挡，说「下一条就会绑」是反的",
+  );
+  assert.match(out, /feishu pair/, "该告诉用户去终端取新码");
+});
+
+test("status：配对码有效且未绑定时，说等待配对", () => {
+  const out = renderStatus({
+    running: true,
+    config: { ...CFG, multiChat: false, bindTarget: "code" },
+    pairingPending: true,
+  });
+  assert.match(out, /等待配对/);
+});
+
+test("status：不走配对码的档位，未绑定时说下一条消息会绑", () => {
+  const out = renderStatus({
+    running: true,
+    config: { ...CFG, multiChat: false, bindTarget: "operator" },
+    pairingPending: false,
+  });
+  assert.match(out, /下一条/);
+});

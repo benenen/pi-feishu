@@ -1,4 +1,5 @@
 import type { Config } from "./config.ts";
+import { gateInbound } from "./gate.ts";
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const total = Math.round(ms / 1000);
@@ -150,11 +151,21 @@ export function renderStatus(info: StatusInfo): string {
       : `${info.boundChatId}`;
   // broker 档下本地没有 pairing 的概念，且「下一条消息会绑定它」是反的 ——
   // 未配对时下一条消息只会被 broker 回一句「请发送配对码」
+  // 文案与真实准入规则用同一个判定，别各推各的 —— 已经漂过一次
+  const gate = gateInbound({
+    bound: false,
+    multiChat: c.multiChat,
+    requireCode: c.bindTarget === "code",
+    codePending: info.pairingPending === true,
+    codeMatched: false,
+  });
   const unbound = isBroker
     ? "尚未绑定 —— 在要绑定的对话里发送终端上显示的配对码（`/feishu pair` 可重新取码）"
-    : info.pairingPending
-      ? "等待配对 —— 在要绑定的对话里发送终端上显示的配对码"
-      : `尚未绑定，下一条通过策略的消息会绑定它（${bindWay}）`;
+    : gate === "pass"
+      ? `尚未绑定，下一条通过策略的消息会绑定它（${c.multiChat ? "multiChat：不要求配对" : bindWay}）`
+      : info.pairingPending
+        ? "等待配对 —— 在要绑定的对话里发送终端上显示的配对码"
+        : "尚未绑定，且当前没有有效的配对码 —— 所有消息都会被挡。在终端跑 `/feishu pair` 取新码";
   const bound = info.boundChatId !== undefined ? `${named}（${bindWay}）` : unbound;
 
   const dm =
