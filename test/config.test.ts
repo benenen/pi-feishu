@@ -327,3 +327,31 @@ test("pairingTtlMs 可配，且必须是正整数", () => {
   );
   assert.ok(e.problems.some((p) => p.includes("pairingTtlMs")));
 });
+
+test("transport 默认 direct —— 不改变存量行为", () => {
+  assert.equal(loadConfig({ files: [base], env: {}, cwd: "/w" }).transport, "direct");
+});
+
+test("transport 接受 broker", () => {
+  assert.equal(
+    loadConfig({ files: [{ ...base, transport: "broker" }], env: {}, cwd: "/w" }).transport,
+    "broker",
+  );
+});
+
+test("transport 拒绝乱填的值", () => {
+  const e = throwsConfigError(() =>
+    loadConfig({ files: [{ ...base, transport: "socket" }], env: {}, cwd: "/w" }),
+  );
+  assert.ok(e.problems.some((p) => p.includes("transport")));
+});
+
+test("brokerSocket 默认在 agentDir 下", () => {
+  const c = loadConfig({ files: [base], env: {}, cwd: "/w" });
+  assert.ok(c.brokerSocket.endsWith("feishu-broker.sock"), c.brokerSocket);
+});
+
+test("brokerSocket 可以显式指定", () => {
+  const c = loadConfig({ files: [{ ...base, brokerSocket: "/tmp/x.sock" }], env: {}, cwd: "/w" });
+  assert.equal(c.brokerSocket, "/tmp/x.sock");
+});

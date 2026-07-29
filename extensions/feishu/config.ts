@@ -38,6 +38,10 @@ export interface Config {
   allowPatterns: string[];
   approvalTimeoutMs: number;
   repoRoot: string;
+  /** direct：会话自己连飞书（默认）；broker：经本地 broker 进程共用一条连接 */
+  transport: "direct" | "broker";
+  /** broker 档下的 Unix socket 路径 */
+  brokerSocket: string;
 }
 
 export class ConfigError extends Error {
@@ -87,6 +91,8 @@ export interface LoadConfigArgs {
   files: (unknown | ConfigFile)[];
   env: Record<string, string | undefined>;
   cwd: string;
+  /** brokerSocket 默认值所在目录；缺省时退回 cwd（历史调用点不必都跟着改） */
+  agentDir?: string;
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
@@ -113,7 +119,7 @@ function readBoolean(v: unknown, key: string, fallback: boolean, problems: strin
   return v;
 }
 
-export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
+export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Config {
   const merged: Record<string, unknown> = {};
   const problems: string[] = [];
 
@@ -190,6 +196,17 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
     }
   }
 
+  let transport: "direct" | "broker" = "direct";
+  if (merged.transport !== undefined) {
+    if (merged.transport === "direct" || merged.transport === "broker") transport = merged.transport;
+    else problems.push('transport 必须是 "direct" 或 "broker"');
+  }
+
+  const brokerSocket =
+    typeof merged.brokerSocket === "string"
+      ? merged.brokerSocket
+      : path.join(agentDir ?? cwd, "feishu-broker.sock");
+
   let approvalMode: ApprovalMode = "balanced";
   if (merged.approvalMode !== undefined) {
     if (
@@ -256,5 +273,7 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
     allowPatterns,
     approvalTimeoutMs,
     repoRoot,
+    transport,
+    brokerSocket,
   };
 }

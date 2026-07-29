@@ -113,6 +113,8 @@ const CFG: Config = {
   allowPatterns: [],
   approvalTimeoutMs: 120_000,
   repoRoot: "/work/repo",
+  transport: "direct",
+  brokerSocket: "/work/repo/feishu-broker.sock",
 };
 
 test("status：未运行时只说未运行，并给出启动方式", () => {

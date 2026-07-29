@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { ConfigError, loadConfig, readConfigFile, type Config } from "./config.ts";
 import { createLogger } from "./log.ts";
 import { FeishuGateway } from "./feishu.ts";
+import { BrokerGateway } from "./broker-gateway.ts";
 import {
   announceAndBind,
   bindToChat,
@@ -28,6 +29,7 @@ function resolveConfig(cwd: string): Config {
     ],
     env: process.env,
     cwd,
+    agentDir: getAgentDir(),
   });
 }
 
@@ -46,7 +48,10 @@ async function withTimeout(work: Promise<void>, ms: number, onTimeout: () => voi
 
 export default function (pi: ExtensionAPI) {
   // 注意：factory 里绝不启动任何后台资源，只声明。
-  let gateway: FeishuGateway | undefined;
+  // GatewayLike 是 Bridge 及其下游看到的耦合面，但 index.ts 这里还要调
+  // unbind/describeBoundChat/connect/disconnect 等两个具体类都有、但 GatewayLike
+  // 没声明的方法，所以用两个具体类的联合类型而不是 GatewayLike
+  let gateway: FeishuGateway | BrokerGateway | undefined;
   let bridge: Bridge | undefined;
   let config: Config | undefined;
 
@@ -64,6 +69,23 @@ export default function (pi: ExtensionAPI) {
     notify(
       `飞书桥接已启动，等待配对。\n在要绑定的飞书对话里发送这串配对码（${minutes} 分钟内有效）：\n\n    ${code}\n`,
     );
+  }
+
+  /**
+   * broker 档的配对码由 broker 签发，这里只是转发请求、把结果显示在终端。
+   * broker 调用不自我包含异常，rejection 必须在这里兜住，不能逃进 pi 的事件循环。
+   */
+  async function requestBrokerPairingCode(
+    gw: BrokerGateway,
+    notify: (msg: string) => void,
+    prefix = "",
+  ): Promise<void> {
+    try {
+      const code = await gw.requestPairingCode();
+      notify(`${prefix}在要绑定的对话里发送配对码：\n\n    ${code}\n`);
+    } catch (err) {
+      notify(`${prefix}获取配对码失败：${String(err)}`);
+    }
   }
 
   // gateway 只在 connect() 返回后才赋值，光靠它挡不住在途的第二次 start：
@@ -97,7 +119,9 @@ export default function (pi: ExtensionAPI) {
     }
     config = cfg;
 
-    const gw = new FeishuGateway(cfg, log);
+    // GatewayLike 是唯一的耦合面，两种传输在这里分叉，
+    // Bridge 及其下游（renderer / risk / approval）完全无感
+    const gw = cfg.transport === "broker" ? new BrokerGateway(log) : new FeishuGateway(cfg, log);
     const br = new Bridge(cfg, gw, log);
 
     gw.onMessage((msg) => {
@@ -151,7 +175,8 @@ export default function (pi: ExtensionAPI) {
     });
 
     try {
-      await gw.connect();
+      if (gw instanceof BrokerGateway) await gw.connect(cfg.brokerSocket, path.basename(cwd), cwd);
+      else await gw.connect();
     } catch (err) {
       // 凭据错、网络不通是新用户最常撞的两件事，必须给出本地化提示，
       // 而不是让异常冒到 pi 的通用错误通道里
@@ -160,6 +185,14 @@ export default function (pi: ExtensionAPI) {
     }
     gateway = gw;
     bridge = br;
+
+    // broker 档下绑定权在 broker 手里：bindTarget 的 operator/oc_xxx/none 三档
+    // 都不生效，统一走「向 broker 要配对码，终端显示」这条路。broker 服务端配对
+    // 成功时自己会往那个飞书对话发确认文案，这里不能再发一遍
+    if (gw instanceof BrokerGateway) {
+      await requestBrokerPairingCode(gw, notify, "飞书桥接已启动（broker 模式）。");
+      return;
+    }
 
     // 按 bindTarget 决定绑谁。绑不上都不是错误 —— 退回等第一条入站消息即可
     const greeting = `pi 会话已就绪（${cwd}），直接发消息即可。`;
@@ -224,6 +257,8 @@ export default function (pi: ExtensionAPI) {
         if (!gateway) notify("飞书桥接未在运行");
         else if (gateway.boundChatId !== undefined) {
           notify("已绑定会话。要换绑请先 /feishu unbind");
+        } else if (gateway instanceof BrokerGateway) {
+          await requestBrokerPairingCode(gateway, notify);
         } else {
           pairing ??= createPairing(config?.pairingTtlMs ?? 600_000, randomInt);
           issuePairingCode(notify);
@@ -231,7 +266,12 @@ export default function (pi: ExtensionAPI) {
       }
       else if (sub === "unbind") {
         if (!gateway) notify("飞书桥接未在运行");
-        else {
+        else if (gateway instanceof BrokerGateway) {
+          // 绑定权在 broker 手里：本地 unbind() 只是让这边不再认那个 chatId，
+          // 真正的解绑要靠已经在 unbind() 里发出的 unbind 帧
+          gateway.unbind();
+          await requestBrokerPairingCode(gateway, notify, "已解绑。");
+        } else {
           gateway.unbind();
           if (config?.bindTarget === "code") {
             pairing ??= createPairing(config.pairingTtlMs, randomInt);
