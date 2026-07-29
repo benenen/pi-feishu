@@ -59,7 +59,15 @@ export class BrokerGateway implements GatewayLike {
     socket.on("data", (chunk: Buffer) => {
       for (const f of this.#reader.push(chunk)) this.#onFrame(f as ServerFrame);
     });
-    const fail = () => this.#failAllPending("broker 连接已断开");
+    // 只清 #pending 不够：往后新发起的调用还是会摸到这个已经死掉的 socket，
+    // #post 里的 write 静默无操作、#await 照样注册一个再也不会 settle 的 pending，
+    // 请求就此永久挂起。必须把 #socket 也清空，让后续调用能借到这条报警线。
+    // close/error 可能都触发（对端 RST 时两个都会来），两次调用都要是幂等的：
+    // 置 undefined 两次无副作用，#failAllPending 第二次面对空 Map 也是空操作。
+    const fail = () => {
+      this.#socket = undefined;
+      this.#failAllPending("broker 连接已断开");
+    };
     socket.on("close", fail);
     socket.on("error", fail);
     this.#socket = socket;
@@ -177,7 +185,13 @@ export class BrokerGateway implements GatewayLike {
     }
   }
 
+  /**
+   * 未连接（尚未连过，或已断线/已 disconnect）时必须立刻 reject，不能注册一个
+   * 借不到任何报警线、此后永远不会 settle 的 pending —— 那样的话，broker 崩溃
+   * 之后同一个实例上继续发起的调用会把整个 agent 回合冻住，只能重启进程。
+   */
   #await(key: string): Promise<ServerFrame> {
+    if (!this.#socket) return Promise.reject(new Error("broker 连接已断开，无法发起请求"));
     return new Promise<ServerFrame>((resolve, reject) => {
       this.#pending.set(key, { resolve, reject });
     });

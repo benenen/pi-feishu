@@ -170,3 +170,32 @@ test("连接断开时未决的请求一律 reject，不能永久挂住", async (
   await assert.rejects(() => pending, /broker/);
   await b.close();
 });
+
+test("意外断线（不调用 disconnect）之后，新发起的请求立刻 reject，不能永久挂住", async () => {
+  const p = tmpSock();
+  let serverSocket: net.Socket | undefined;
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    const reader = new FrameReader();
+    socket.on("data", (chunk: Buffer) => {
+      for (const f of reader.push(chunk) as ClientFrame[]) {
+        if (f.t === "hello") socket.write(encodeFrame({ t: "hello_ok" }));
+      }
+    });
+  });
+  await new Promise<void>((r) => server.listen(p, () => r()));
+
+  const gw = new BrokerGateway(() => {});
+  await gw.connect(p, "A", "/a");
+
+  // 模拟 broker 崩溃：服务端主动断开，客户端全程不调用 disconnect()
+  serverSocket?.destroy();
+  // 等断线事件（close/error）真正落地到客户端 socket 上
+  await new Promise((r) => setTimeout(r, 50));
+
+  // 断线之后才发起的新请求：不能借着一个已经死掉的 socket 永久挂起，必须立刻 reject
+  await assert.rejects(() => gw.sendText("你好"), /broker/);
+
+  await gw.disconnect();
+  await new Promise<void>((r) => server.close(() => r()));
+});
