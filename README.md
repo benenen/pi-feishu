@@ -47,6 +47,7 @@ pi install git:github.com/you/pi-feishu
 | `dmMode` | 见右 | `open` 所有人可私聊；`allowlist` 只认名单。**一个白名单键都没配时默认 `open`**，配了 `dmAllowlist`/`groupAllowlist` 则自动切 `allowlist`（老配置不会被悄悄放开）|
 | `dmAllowlist` | `[]` | 允许私聊的 open_id（`ou_` 开头）。**open_id 按应用隔离** —— 换了 appId 就得重新取 |
 | `groupAllowlist` | `[]` | 允许的群 chat_id（`oc_` 开头）。**空数组表示「不限」，不是「全部禁止」** |
+| `readReceiptEmoji` | `"EYES"` | 开始处理一条消息时给它加的表情回应，充当「已读/在处理」信号。取值是**飞书的具名表情 key**（不是 Unicode 表情）；置空字符串关闭 |
 | `multiChat` | `false` | **仅 direct 档**：一个 pi 会话同时服务多个对话（私聊 + 群 @），回复回到消息来源。开启后不再做会话级绑定过滤，谁能触达完全由 `dmMode` / 白名单 / `requireMention` 决定 |
 | `requireMention` | `true` | 群里是否必须 @ 机器人。**群里拉了多个 bot 时必须保持 `true`** —— 设成 `false` 等于不看 @，每条群消息会同时喂给群里所有 bot，多个 agent 一起干活、一起刷屏。只对群生效，私聊不受影响 |
 

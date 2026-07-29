@@ -371,3 +371,25 @@ test("autoStartBroker 必须是布尔值", () => {
   );
   assert.ok(e.problems.some((p) => p.includes("autoStartBroker")));
 });
+
+test("readReceiptEmoji 默认 EYES", () => {
+  assert.equal(loadConfig({ files: [base], env: {}, cwd: "/w" }).readReceiptEmoji, "EYES");
+});
+
+test("readReceiptEmoji 可换成别的表情，也可置空关掉", () => {
+  assert.equal(
+    loadConfig({ files: [{ ...base, readReceiptEmoji: "OK" }], env: {}, cwd: "/w" }).readReceiptEmoji,
+    "OK",
+  );
+  assert.equal(
+    loadConfig({ files: [{ ...base, readReceiptEmoji: "" }], env: {}, cwd: "/w" }).readReceiptEmoji,
+    "",
+  );
+});
+
+test("readReceiptEmoji 必须是字符串", () => {
+  const e = throwsConfigError(() =>
+    loadConfig({ files: [{ ...base, readReceiptEmoji: 1 }], env: {}, cwd: "/w" }),
+  );
+  assert.ok(e.problems.some((p) => p.includes("readReceiptEmoji")));
+});

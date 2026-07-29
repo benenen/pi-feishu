@@ -110,6 +110,7 @@ const CFG: Config = {
   pairingTtlMs: 600_000,
   requireMention: true,
   multiChat: false,
+  readReceiptEmoji: "EYES",
   approvalMode: "balanced",
   denyPatterns: [],
   allowPatterns: [],

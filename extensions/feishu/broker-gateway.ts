@@ -171,6 +171,12 @@ export class BrokerGateway implements GatewayLike {
     await this.#awaitId(id);
   }
 
+  /** 纯信号，不等回执 —— 加不上表情不该让调用方阻塞 */
+  async react(messageId: string, emoji: string): Promise<void> {
+    if (emoji === "") return;
+    this.#post({ t: "react", messageId, emoji });
+  }
+
   async downloadImage(fileKey: string): Promise<Buffer | undefined> {
     const id = this.#nextId();
     this.#post({ t: "download_image", id, fileKey });
@@ -224,6 +230,7 @@ export class BrokerGateway implements GatewayLike {
     switch (f.t) {
       case "message":
         this.#messageHandler?.({
+          messageId: f.messageId,
           chatId: f.chatId,
           senderId: f.senderId,
           text: f.text,

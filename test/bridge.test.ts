@@ -97,6 +97,7 @@ const CONFIG = {
   pairingTtlMs: 600_000,
   requireMention: true,
   multiChat: false,
+  readReceiptEmoji: "EYES",
   approvalMode: "balanced" as const,
   denyPatterns: [],
   allowPatterns: [],

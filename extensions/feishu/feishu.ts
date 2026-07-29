@@ -71,6 +71,7 @@ export class FeishuGateway {
 
     channel.on("message", (msg) => {
       this.#messageHandler?.({
+        messageId: msg.messageId,
         chatId: msg.chatId,
         senderId: msg.senderId,
         text: msg.content,
@@ -170,6 +171,16 @@ export class FeishuGateway {
       params: { receive_id_type: "open_id" },
     });
     return res.data?.chat_id;
+  }
+
+  /** 加表情回应。失败只记日志 —— 已读信号发不出去，不该连消息都处理不了 */
+  async react(messageId: string, emoji: string): Promise<void> {
+    if (emoji === "") return;
+    try {
+      await this.#channel?.addReaction(messageId, emoji);
+    } catch (err) {
+      this.#log(`加表情回应失败（${emoji}）：${String(err)}`, "warning");
+    }
   }
 
   async downloadImage(fileKey: string): Promise<Buffer | undefined> {

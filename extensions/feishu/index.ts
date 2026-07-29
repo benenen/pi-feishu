@@ -239,6 +239,11 @@ export default function (pi: ExtensionAPI) {
           if (text === "") return;
           // 登记来源，agent_start 时按 FIFO 认领 —— pi 的事件不带触发者信息。
           // steer 是插进当前回合、不开新回合的，入队会让之后每个回合都错位一个
+          // 开始处理就给这条消息加个「在看」的表情 —— 飞书没有给机器人
+          // 「标记已读」的接口，表情是通行做法。fire-and-forget：加不上不该
+          // 影响消息处理，react 内部已自兜异常
+          void gw.react?.(msg.messageId, cfg.readReceiptEmoji);
+
           if (deliverAs !== "steer") br.noteInboundOrigin(msg.chatId);
           await pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
         } catch (err) {

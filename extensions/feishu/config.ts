@@ -35,6 +35,12 @@ export interface Config {
    * 仅 direct 档有效 —— broker 档下一个会话本就只绑一个对话。
    */
   multiChat: boolean;
+  /**
+   * 开始处理一条入站消息时给它加的表情回应，充当「已读/在处理」的信号 ——
+   * 飞书没有给机器人「标记已读」的接口，表情是通行做法。置空字符串则关闭。
+   * 取值是飞书的具名表情 key（不是 Unicode 表情）。
+   */
+  readReceiptEmoji: string;
   requireMention: boolean;
   approvalMode: ApprovalMode;
   /** relaxed 档追加的危险模式（正则源串），加载时已校验可编译 */
@@ -155,6 +161,12 @@ export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Confi
   const autoStartBroker = readBoolean(merged.autoStartBroker, "autoStartBroker", true, problems);
   const requireMention = readBoolean(merged.requireMention, "requireMention", true, problems);
   const multiChat = readBoolean(merged.multiChat, "multiChat", false, problems);
+
+  let readReceiptEmoji = "EYES";
+  if (merged.readReceiptEmoji !== undefined) {
+    if (typeof merged.readReceiptEmoji === "string") readReceiptEmoji = merged.readReceiptEmoji;
+    else problems.push("readReceiptEmoji 必须是字符串");
+  }
 
   let dmMode: DmMode = "open";
   if (merged.dmMode !== undefined) {
@@ -281,6 +293,7 @@ export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Confi
     pairingTtlMs,
     requireMention,
     multiChat,
+    readReceiptEmoji,
     approvalMode,
     denyPatterns,
     allowPatterns,

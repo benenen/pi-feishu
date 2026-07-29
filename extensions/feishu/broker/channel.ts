@@ -56,6 +56,7 @@ export class BrokerChannel implements BrokerChannelLike {
 
     channel.on("message", (msg) => {
       this.#messageHandler?.({
+        messageId: msg.messageId,
         chatId: msg.chatId,
         senderId: msg.senderId,
         text: msg.content,
@@ -107,6 +108,15 @@ export class BrokerChannel implements BrokerChannelLike {
     const channel = this.#channel;
     if (!channel) return;
     await channel.stream(chatId, { markdown: async (controller) => run(controller) });
+  }
+
+  async react(messageId: string, emoji: string): Promise<void> {
+    if (emoji === "") return;
+    try {
+      await this.#channel?.addReaction(messageId, emoji);
+    } catch (err) {
+      this.#log(`加表情回应失败（${emoji}）：${String(err)}`, "warning");
+    }
   }
 
   async downloadImage(fileKey: string): Promise<Buffer | undefined> {

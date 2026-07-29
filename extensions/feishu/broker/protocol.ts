@@ -13,6 +13,7 @@ export type ClientFrame =
   | { t: "stream_end"; id: string }
   | { t: "ask"; id: string; toolName: string; input: Record<string, unknown> }
   | { t: "ask_cancel"; id: string }
+  | { t: "react"; messageId: string; emoji: string }
   | { t: "download_image"; id: string; fileKey: string }
   | { t: "describe_chat"; id: string };
 
@@ -21,7 +22,7 @@ export type ServerFrame =
   | { t: "pair_code"; id: string; code: string; expiresAt: number }
   | { t: "bound"; chatId: string }
   | { t: "unbound" }
-  | { t: "message"; chatId: string; senderId: string; text: string; imageKeys: string[] }
+  | { t: "message"; messageId: string; chatId: string; senderId: string; text: string; imageKeys: string[] }
   | { t: "ask_result"; id: string; allow: boolean; reason: string; scope?: "turn" }
   | { t: "ok"; id: string }
   | { t: "err"; id: string; message: string }

@@ -25,6 +25,11 @@ export interface GatewayLike {
   sendText(markdown: string, to?: string): Promise<void>;
   downloadImage(fileKey: string): Promise<Buffer | undefined>;
   /**
+   * 给消息加表情回应，充当「已读/在处理」的信号。
+   * 可选：不是所有传输都支持；失败绝不能影响消息处理本身。
+   */
+  react?(messageId: string, emoji: string): Promise<void>;
+  /**
    * 面向指定会话的审批通道。多会话模式下，卡片必须弹回触发该回合的那个对话 ——
    * 弹错地方就是让不相干的人看见并批准。
    */

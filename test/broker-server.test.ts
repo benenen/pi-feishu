@@ -28,6 +28,7 @@ function fakeChannel(sent: Array<{ chatId: string; text: string }>): BrokerChann
     async describeChat() {
       return "假会话";
     },
+    async react() {},
   };
 }
 
@@ -86,11 +87,11 @@ test("配对码匹配的入站消息完成绑定，之后该 chat 的消息投�
   c.send({ t: "pair_request", id: "1" });
   const code = (await c.waitFor("pair_code")) as { code: string };
 
-  server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+  server.deliver({ messageId: "om_x", chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
   const bound = (await c.waitFor("bound")) as { chatId: string };
   assert.equal(bound.chatId, "oc_1");
 
-  server.deliver({ chatId: "oc_1", senderId: "ou_1", text: "跑测试", imageKeys: [] });
+  server.deliver({ messageId: "om_x", chatId: "oc_1", senderId: "ou_1", text: "跑测试", imageKeys: [] });
   const msg = (await c.waitFor("message")) as { text: string };
   assert.equal(msg.text, "跑测试");
 
@@ -107,7 +108,7 @@ test("未绑定 chat 的消息不会投给任何会话", async () => {
   c.send({ t: "hello", cwd: "/w", label: "A" });
   await c.waitFor("hello_ok");
 
-  server.deliver({ chatId: "oc_x", senderId: "ou_1", text: "在吗", imageKeys: [] });
+  server.deliver({ messageId: "om_x", chatId: "oc_x", senderId: "ou_1", text: "在吗", imageKeys: [] });
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(c.frames.some((f) => f.t === "message"), false, "不该投递");
   assert.ok(sent.some((s) => s.chatId === "oc_x"), "应回一句提示，告诉对方需要配对码");
@@ -126,7 +127,7 @@ test("send_text 转发到 channel 并回 ok", async () => {
   await c.waitFor("hello_ok");
   c.send({ t: "pair_request", id: "1" });
   const code = (await c.waitFor("pair_code")) as { code: string };
-  server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+  server.deliver({ messageId: "om_x", chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
   await c.waitFor("bound");
 
   c.send({ t: "send_text", id: "9", markdown: "结果" });
@@ -160,7 +161,7 @@ test("会话断开后，它绑的 chat 变成未绑定", async () => {
   await c.waitFor("hello_ok");
   c.send({ t: "pair_request", id: "1" });
   const code = (await c.waitFor("pair_code")) as { code: string };
-  server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+  server.deliver({ messageId: "om_x", chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
   await c.waitFor("bound");
 
   c.sock.destroy();
@@ -180,7 +181,7 @@ test("配对成功会给该 chat 发一句确认文案，不能让用户输完�
   c.send({ t: "pair_request", id: "1" });
   const code = (await c.waitFor("pair_code")) as { code: string };
 
-  server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+  server.deliver({ messageId: "om_x", chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
   await c.waitFor("bound");
 
   const confirm = sent.find((s) => s.chatId === "oc_1");
@@ -201,7 +202,7 @@ test("流式：begin/chunk/end 依次转成 channel 的 append", async () => {
   await c.waitFor("hello_ok");
   c.send({ t: "pair_request", id: "1" });
   const code = (await c.waitFor("pair_code")) as { code: string };
-  server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+  server.deliver({ messageId: "om_x", chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
   await c.waitFor("bound");
   // 绑定成功会往 sent 里塞一条确认文案（见上一个测试）；这里只关心流式本身，
   // 清空掉避免两个各自独立的行为互相污染断言。
@@ -242,6 +243,7 @@ test("连接在流式中途断开：孤儿流不会变成 unhandledRejection", a
     async describeChat() {
       return "假会话";
     },
+    async react() {},
   };
 
   let rejections = 0;
@@ -258,7 +260,7 @@ test("连接在流式中途断开：孤儿流不会变成 unhandledRejection", a
   await c.waitFor("hello_ok");
   c.send({ t: "pair_request", id: "1" });
   const code = (await c.waitFor("pair_code")) as { code: string };
-  server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+  server.deliver({ messageId: "om_x", chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
   await c.waitFor("bound");
 
   c.send({ t: "stream_begin", id: "s" });
@@ -300,6 +302,7 @@ test("流式中途失败但连接没断：done 的 rejection 不能冒成 unhand
     async describeChat() {
       return "假会话";
     },
+    async react() {},
   };
 
   let rejections = 0;
@@ -316,7 +319,7 @@ test("流式中途失败但连接没断：done 的 rejection 不能冒成 unhand
   await c.waitFor("hello_ok");
   c.send({ t: "pair_request", id: "1" });
   const code = (await c.waitFor("pair_code")) as { code: string };
-  server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+  server.deliver({ messageId: "om_x", chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
   await c.waitFor("bound");
 
   try {
@@ -360,7 +363,7 @@ test("channel 抛错时回 err —— 既不回 ok 也不回 err 会让客户端
   await c.waitFor("hello_ok");
   c.send({ t: "pair_request", id: "1" });
   const code = (await c.waitFor("pair_code")) as { code: string };
-  server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+  server.deliver({ messageId: "om_x", chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
   await c.waitFor("bound");
 
   try {
@@ -529,7 +532,7 @@ test("send_text 的 to 只能是本会话已绑的 chat —— 它不是跨会�
     await a.waitFor("hello_ok");
     a.send({ t: "pair_request", id: "1" });
     const code = (await a.waitFor("pair_code")) as { code: string };
-    server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+    server.deliver({ messageId: "om_x", chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
     await a.waitFor("bound");
     sent.length = 0;
 
@@ -567,7 +570,7 @@ test("接手别人让出来的 chat 时，不该给任何人发多余的 unbound
     await a.waitFor("hello_ok");
     a.send({ t: "pair_request", id: "1" });
     const codeA = (await a.waitFor("pair_code")) as { code: string };
-    server.deliver({ chatId: "oc_1", senderId: "ou_1", text: codeA.code, imageKeys: [] });
+    server.deliver({ messageId: "om_x", chatId: "oc_1", senderId: "ou_1", text: codeA.code, imageKeys: [] });
     await a.waitFor("bound");
 
     // A 主动解绑把 oc_1 让出来（这一条 unbound 是它自己要来的）
@@ -580,7 +583,7 @@ test("接手别人让出来的 chat 时，不该给任何人发多余的 unbound
     await b.waitFor("hello_ok");
     b.send({ t: "pair_request", id: "1" });
     const codeB = (await b.waitFor("pair_code")) as { code: string };
-    server.deliver({ chatId: "oc_1", senderId: "ou_1", text: codeB.code, imageKeys: [] });
+    server.deliver({ messageId: "om_x", chatId: "oc_1", senderId: "ou_1", text: codeB.code, imageKeys: [] });
     await b.waitFor("bound");
     await new Promise((r) => setTimeout(r, 50));
 
@@ -593,6 +596,31 @@ test("接手别人让出来的 chat 时，不该给任何人发多余的 unbound
   } finally {
     a.sock.destroy();
     b.sock.destroy();
+    await server.close();
+  }
+});
+
+test("react 帧转发给飞书通道，且不需要回执", async () => {
+  const reacted: { messageId: string; emoji: string }[] = [];
+  const channel = {
+    ...fakeChannel([]),
+    async react(messageId: string, emoji: string) {
+      reacted.push({ messageId, emoji });
+    },
+  };
+  const server = new BrokerServer({ channel, pairingTtlMs: 600_000, log: () => {} });
+  const p = tmpSock();
+  await server.listen(p);
+  const c = await connect(p);
+  try {
+    c.send({ t: "hello", cwd: "/w", label: "A" });
+    await c.waitFor("hello_ok");
+    c.send({ t: "react", messageId: "om_1", emoji: "EYES" });
+    // 无回执，轮询直到转发发生
+    for (let i = 0; i < 50 && reacted.length === 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(reacted, [{ messageId: "om_1", emoji: "EYES" }]);
+  } finally {
+    c.sock.destroy();
     await server.close();
   }
 });

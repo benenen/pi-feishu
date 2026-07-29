@@ -16,6 +16,7 @@ export interface BrokerChannelLike {
   streamTo(chatId: string, run: (sink: AppendSink) => Promise<void>): Promise<void>;
   askCard(chatId: string, req: ApprovalRequest, signal: AbortSignal): Promise<Decision>;
   downloadImage(fileKey: string): Promise<Buffer | undefined>;
+  react(messageId: string, emoji: string): Promise<void>;
   describeChat(chatId: string): Promise<string | undefined>;
 }
 
@@ -135,6 +136,7 @@ export class BrokerServer {
     if (owner) {
       this.#send(owner.id, {
         t: "message",
+        messageId: msg.messageId,
         chatId: msg.chatId,
         senderId: msg.senderId,
         text: msg.text,
@@ -342,6 +344,11 @@ export class BrokerServer {
       case "ask_cancel":
         conn.asks.get(f.id)?.abort();
         conn.asks.delete(f.id);
+        return;
+
+      case "react":
+        // 纯信号，没有回执 —— 加不上表情不该让调用方等
+        await this.#channel.react(f.messageId, f.emoji);
         return;
 
       case "download_image": {
