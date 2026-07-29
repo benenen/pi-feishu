@@ -97,7 +97,7 @@ const CONFIG = {
   pairingTtlMs: 600_000,
   requireMention: true,
   multiChat: false,
-  readReceiptEmoji: "EYES",
+  readReceiptEmoji: "GLANCE",
   approvalMode: "balanced" as const,
   denyPatterns: [],
   allowPatterns: [],
@@ -396,44 +396,58 @@ function targetTrackingGateway(sink: {
 
 const MULTI = { ...CONFIG, multiChat: true };
 
-test("多会话：两个回合分别流回各自的来源", async () => {
+test("多会话：按消息原文关联来源，两个回合分别流回各自的对话", async () => {
   const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
   const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
 
-  bridge.noteInboundOrigin("oc_dm");
+  bridge.noteInboundOrigin("跑测试", "oc_dm");
+  bridge.onUserPrompt("跑测试", "feishu");
   bridge.startTurn();
   await bridge.endTurn();
 
-  bridge.noteInboundOrigin("oc_group");
+  bridge.noteInboundOrigin("看日志", "oc_group");
+  bridge.onUserPrompt("看日志", "feishu");
   bridge.startTurn();
   await bridge.endTurn();
 
   assert.deepEqual(sink.streams, ["oc_dm", "oc_group"]);
 });
 
-test("终端发起的回合没有来源，流到默认收件方（undefined）", async () => {
+test("终端发起的回合走默认收件方，不会认领飞书来源", async () => {
   const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
   const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
 
-  bridge.startTurn(); // 没有 noteInboundOrigin
+  bridge.noteInboundOrigin("跑测试", "oc_dm");   // 飞书消息已登记但回合还没开
+  bridge.onUserPrompt("看下日志", "interactive"); // 终端先开了一个回合
+  bridge.startTurn();
   await bridge.endTurn();
 
-  assert.deepEqual(sink.streams, [undefined], "退回网关的默认收件方，而不是乱发给上一个来源");
+  assert.deepEqual(sink.streams, [undefined], "终端的回合绝不能借用飞书的来源");
 });
 
-test("来源按 FIFO 出队，不会串到别的回合", async () => {
+test("消息被并进正在跑的回合（followUp/steer 都可能）也不会让后续错位", async () => {
   const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
   const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
 
-  // 两条消息先后排队（followUp 场景），回合再依次开
-  bridge.noteInboundOrigin("oc_a");
-  bridge.noteInboundOrigin("oc_b");
+  bridge.noteInboundOrigin("第一条", "oc_dm");
+  bridge.onUserPrompt("第一条", "feishu");
   bridge.startTurn();
+  // 回合进行中群里又来一条，被并进当前回合、没有开新回合
+  bridge.noteInboundOrigin("第二条", "oc_group");
+  bridge.onUserPrompt("第二条", "feishu");
   await bridge.endTurn();
+
+  // 下一个回合来自私聊
+  bridge.noteInboundOrigin("第三条", "oc_dm");
+  bridge.onUserPrompt("第三条", "feishu");
   bridge.startTurn();
   await bridge.endTurn();
 
-  assert.deepEqual(sink.streams, ["oc_a", "oc_b"]);
+  assert.deepEqual(
+    sink.streams,
+    ["oc_dm", "oc_dm"],
+    "按文本关联时，没开成回合的那条不会占位，第三条仍然回私聊",
+  );
 });
 
 test("流式失败时补发的全文也发回同一个来源", async () => {
@@ -447,7 +461,8 @@ test("流式失败时补发的全文也发回同一个来源", async () => {
   };
   const bridge = new Bridge(MULTI, failing, () => {}, () => 0, 1000);
 
-  bridge.noteInboundOrigin("oc_group");
+  bridge.noteInboundOrigin("x", "oc_group");
+  bridge.onUserPrompt("x", "feishu");
   bridge.startTurn();
   bridge.onTextDelta("结果");
   await bridge.endTurn();
@@ -465,7 +480,8 @@ test("审批卡片发到触发该回合的那个对话", async () => {
     1000,
   );
 
-  bridge.noteInboundOrigin("oc_group");
+  bridge.noteInboundOrigin("x", "oc_group");
+  bridge.onUserPrompt("x", "feishu");
   bridge.startTurn();
   await bridge.gateToolCall("bash", { command: "rm -rf x" }, undefined);
 
@@ -482,47 +498,6 @@ test("multiChat 打开时接受任何会话 —— 过滤交给飞书侧的策�
   assert.equal(shouldAccept({ boundChatId: "oc_a" }, "oc_b", true), true);
   assert.equal(shouldAccept({}, "oc_whatever", true), true);
 });
-
-test("终端在空闲时开的回合占用自己的槽位，不会认领飞书来源", async () => {
-  const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
-  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
-
-  // 空闲时敲终端 —— 这一下会立刻开一个回合，必须占掉一个槽位
-  bridge.onUserPrompt("看下日志", "interactive");
-  // 紧接着飞书私聊来了一条
-  bridge.noteInboundOrigin("oc_dm");
-
-  bridge.startTurn();           // 终端那个回合
-  await bridge.endTurn();
-  bridge.startTurn();           // 飞书那条的回合
-  await bridge.endTurn();
-
-  assert.deepEqual(
-    sink.streams,
-    [undefined, "oc_dm"],
-    "终端不占槽位的话，它会认领掉 oc_dm，把终端的输出发进私聊，而私聊那条回落到已绑定会话",
-  );
-});
-
-test("steer 消息不占用来源槽位 —— 它不产生新回合", async () => {
-  const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
-  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
-
-  bridge.noteInboundOrigin("oc_dm");
-  bridge.startTurn(); // 认领 oc_dm
-  // 回合进行中，群里 @ 了一句打断（steer）—— 不会开新回合
-  bridge.onUserPrompt("!停一下", "feishu");
-  await bridge.endTurn();
-
-  // 下一个回合来自私聊
-  bridge.noteInboundOrigin("oc_dm2");
-  bridge.startTurn();
-  await bridge.endTurn();
-
-  assert.deepEqual(sink.streams, ["oc_dm", "oc_dm2"], "steer 压了槽位的话，这里会错位");
-});
-
-// ── 入站准入判定 ────────────────────────────────────────────────────
 
 test("已绑定的会话直接放行", () => {
   assert.equal(

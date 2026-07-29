@@ -244,7 +244,7 @@ export default function (pi: ExtensionAPI) {
           // 影响消息处理，react 内部已自兜异常
           void gw.react?.(msg.messageId, cfg.readReceiptEmoji);
 
-          if (deliverAs !== "steer") br.noteInboundOrigin(msg.chatId);
+          br.noteInboundOrigin(text, msg.chatId);
           await pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
         } catch (err) {
           log(`处理入站消息失败：${String(err)}`, "error");

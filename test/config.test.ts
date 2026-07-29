@@ -373,7 +373,7 @@ test("autoStartBroker 必须是布尔值", () => {
 });
 
 test("readReceiptEmoji 默认 EYES", () => {
-  assert.equal(loadConfig({ files: [base], env: {}, cwd: "/w" }).readReceiptEmoji, "EYES");
+  assert.equal(loadConfig({ files: [base], env: {}, cwd: "/w" }).readReceiptEmoji, "GLANCE");
 });
 
 test("readReceiptEmoji 可换成别的表情，也可置空关掉", () => {

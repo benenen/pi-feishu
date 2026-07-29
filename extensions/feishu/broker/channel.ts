@@ -2,6 +2,7 @@ import { createLarkChannel, LoggerLevel } from "@larksuiteoapi/node-sdk";
 import type { LarkChannel } from "@larksuiteoapi/node-sdk";
 import { createSdkLogger, type LogFn } from "../log.ts";
 import { chatLabel } from "../renderer.ts";
+import { isInvalidEmojiError } from "../reaction.ts";
 import type { AppendSink } from "../turn-stream.ts";
 import type { ApprovalRequest, Decision } from "../approval.ts";
 import type { Config } from "../config.ts";
@@ -110,11 +111,23 @@ export class BrokerChannel implements BrokerChannelLike {
     await channel.stream(chatId, { markdown: async (controller) => run(controller) });
   }
 
+  /** 表情 key 填错时飞书每次都报 231001，且 SDK 会打一坨 axios 转储 —— 认出来就别再试 */
+  #reactionDisabled = false;
+
   async react(messageId: string, emoji: string): Promise<void> {
-    if (emoji === "") return;
+    if (emoji === "" || this.#reactionDisabled) return;
     try {
       await this.#channel?.addReaction(messageId, emoji);
     } catch (err) {
+      if (isInvalidEmojiError(err)) {
+        this.#reactionDisabled = true;
+        this.#log(
+          `表情 key「${emoji}」不被飞书接受，已停止加表情回应。` +
+            `改 readReceiptEmoji 换一个（例如 GLANCE），或置空关闭该功能。`,
+          "warning",
+        );
+        return;
+      }
       this.#log(`加表情回应失败（${emoji}）：${String(err)}`, "warning");
     }
   }

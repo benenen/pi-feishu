@@ -194,18 +194,16 @@ interface TurnState {
 export class Bridge {
   #turn: TurnState | undefined;
   /**
-   * 待认领的入站来源，FIFO。转发消息给 pi 时入队，agent_start 时出队。
+   * 已转发给 pi、等待被 input 事件认领的入站来源，按**消息原文**关联。
    *
-   * pi 的 agent_start 事件不带「是哪条消息触发的」，所以来源只能靠顺序推断。
-   * 要让顺序成立，**一个回合必须恰好对应一个槽位**：
-   *   - steer 消息不产生新回合，因此不入队（由 index.ts 判断后决定调不调）
-   *   - 终端输入在空闲时会立刻开一个回合，因此要入队一个 undefined 占位
-   *
-   * 仍有一处对不上：流式进行中的终端输入被 pi 排成 followUp 时会晚一步开回合，
-   * 而此刻分不清它是 steer 还是 followUp，所以不入队 —— 那个回合会认领掉一个
-   * 飞书来源。见 docs/direct.md「来源归属会在哪里对不上」。
+   * 不用 FIFO 队列是因为它要求「一个回合恰好对应一个槽位」，而这个前提站不住：
+   * 一条消息被并进正在跑的回合（steer，或 followUp 被合并）时不会产生新回合，
+   * 它占的槽位就永远没人认领，之后每个回合全部错位一位 —— 症状是「群里问的，
+   * 答案发到私聊里」。而 pi 的 input 事件带着我们发出去的原文，能精确对上。
    */
-  #origins: (string | undefined)[] = [];
+  #pendingOrigins: { text: string; chatId: string }[] = [];
+  /** 最近一次认领到的来源；开新回合时快照给该回合 */
+  #nextTarget: string | undefined;
   /** 当前回合的出站目标 */
   #turnTarget: string | undefined;
   #toolStartedAt = new Map<string, number>();
@@ -264,15 +262,15 @@ export class Bridge {
     });
   }
 
-  /** 转发入站消息给 pi 之前调用，登记这条消息的来源 */
-  noteInboundOrigin(chatId: string): void {
-    this.#origins.push(chatId);
+  /** 转发入站消息给 pi 之前调用，按原文登记这条消息的来源 */
+  noteInboundOrigin(text: string, chatId: string): void {
+    this.#pendingOrigins.push({ text, chatId });
   }
 
   startTurn(): void {
     if (this.#turn) return;
     this.#turnApproved = false;
-    this.#turnTarget = this.#origins.shift();
+    this.#turnTarget = this.#nextTarget;
     const stream = new TurnStream();
     const turn: TurnState = {
       stream,
@@ -292,11 +290,15 @@ export class Bridge {
   }
 
   onUserPrompt(text: string, source: "interactive" | "feishu"): void {
-    // 终端输入在空闲时会立刻开一个回合，它必须占掉一个来源槽位 ——
-    // 否则它会认领走排在前面的飞书来源，把终端的输出发进那个对话，
-    // 而飞书那条消息的回合发现队列空了，回落到默认收件方（先前绑定的会话）。
-    // 症状就是「私聊里发的消息，回复出现在之前配对好的群里」。
-    if (source === "interactive" && !this.isStreaming) this.#origins.push(undefined);
+    // 来源在这里认领：input 事件带着我们发出去的原文，能精确对上是哪个对话发的。
+    // 终端输入没有飞书来源，必须清掉 —— 否则它会沿用上一条飞书消息的目标，
+    // 把终端回合的输出发进那个对话
+    if (source === "interactive") {
+      this.#nextTarget = undefined;
+    } else {
+      const i = this.#pendingOrigins.findIndex((o) => o.text === text);
+      if (i !== -1) this.#nextTarget = this.#pendingOrigins.splice(i, 1)[0]?.chatId;
+    }
 
     const rendered = renderUserPrompt(text, source);
     if (rendered !== null) this.#push(rendered);

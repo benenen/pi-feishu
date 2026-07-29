@@ -162,7 +162,7 @@ export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Confi
   const requireMention = readBoolean(merged.requireMention, "requireMention", true, problems);
   const multiChat = readBoolean(merged.multiChat, "multiChat", false, problems);
 
-  let readReceiptEmoji = "EYES";
+  let readReceiptEmoji = "GLANCE";
   if (merged.readReceiptEmoji !== undefined) {
     if (typeof merged.readReceiptEmoji === "string") readReceiptEmoji = merged.readReceiptEmoji;
     else problems.push("readReceiptEmoji 必须是字符串");
