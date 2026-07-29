@@ -37,6 +37,8 @@ export class SessionRegistry {
   }
 
   add(handle: SessionHandle): void {
+    // 幂等：先清掉旧条目（包括它的 #byChat 映射），再创建新条目
+    this.remove(handle.id);
     this.#entries.set(handle.id, {
       handle,
       pairing: new Pairing({

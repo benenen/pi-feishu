@@ -121,3 +121,12 @@ test("list 列出全部会话及其绑定", () => {
   assert.equal(rows.find((x) => x.id === "s1")?.chatId, "oc_1");
   assert.equal(rows.find((x) => x.id === "s2")?.chatId, undefined);
 });
+
+test("重复 add 同一个 id 不会留下陈旧的 chatId 路由", () => {
+  const r = makeRegistry();
+  r.add(A);
+  r.bind("s1", "oc_1");
+  r.add(A); // 不先 remove
+  assert.equal(r.byChat("oc_1"), undefined, "旧路由必须被清掉，否则两个索引会互相矛盾");
+  assert.equal(r.boundChatOf("s1"), undefined);
+});
