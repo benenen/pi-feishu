@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { createLarkChannel, LoggerLevel } from "@larksuiteoapi/node-sdk";
 import type { LarkChannel } from "@larksuiteoapi/node-sdk";
 import { createSdkLogger, type LogFn } from "../log.ts";
@@ -8,9 +7,9 @@ import type { ApprovalRequest, Decision } from "../approval.ts";
 import type { Config } from "../config.ts";
 import {
   ApprovalRegistry,
-  buildApprovalCard,
+  askViaCard,
   buildSettledCard,
-  parseApprovalAction,
+  handleCardAction,
 } from "../approval-card.ts";
 import type { BrokerChannelLike } from "./server.ts";
 import type { InboundMessage } from "../types.ts";
@@ -64,26 +63,19 @@ export class BrokerChannel implements BrokerChannelLike {
       });
     });
 
+    // 与 direct 档共用 handleCardAction —— 这段安全代码曾经是两份副本，
+    // 而 broker 那份把会话校验整个漏掉了。
+    // 这里不传 requireBoundChat：一个 broker 服务多个对话，「当前绑定」是每个
+    // pi 会话各自的概念，不在这一层；会话这一层由登记时记下的 chatId 兜住 ——
+    // 卡片发往哪个对话，就只认那个对话里的点击。
     channel.on("cardAction", (evt) => {
-      const action = parseApprovalAction(evt.action.value);
-      if (!action) return;
-      // 卡片回调不经飞书的策略管道，必须自己鉴权；
-      // broker 服务多个对话，所以只校验操作人，不校验 chatId
-      if (!this.#config.approverAllowlist.includes(evt.operator.openId)) {
-        this.#log(`忽略非授权审批人的卡片点击：${evt.operator.openId}`, "warning");
-        return;
-      }
-      const messageId = this.#approvals.settle(action.id, {
-        allow: action.allow,
-        reason: action.scope === "turn" ? "飞书批准（本回合全部允许）" : action.allow ? "飞书批准" : "飞书拒绝",
-        ...(action.scope === "turn" ? { scope: "turn" as const } : {}),
+      const settlement = handleCardAction({
+        registry: this.#approvals,
+        event: evt,
+        approverAllowlist: this.#config.approverAllowlist,
+        log: this.#log,
       });
-      if (messageId) {
-        void this.#settleCard(
-          messageId,
-          action.scope === "turn" ? "已批准（本回合全部允许）" : action.allow ? "已批准" : "已拒绝",
-        );
-      }
+      if (settlement) void this.#settleCard(settlement.messageId, settlement.status);
     });
 
     channel.on("reject", (evt) => this.#log(`飞书拒收消息：${evt.reason}`, "warning"));
@@ -136,37 +128,18 @@ export class BrokerChannel implements BrokerChannelLike {
     }
   }
 
+  /** 卡片的发送/登记/竞速收尾与 direct 档共用，两边只是收件会话的来源不同 */
   async askCard(chatId: string, req: ApprovalRequest, signal: AbortSignal): Promise<Decision> {
     const channel = this.#channel;
     if (!channel) throw new Error("飞书未连接");
-    if (signal.aborted) return { allow: false, reason: "已由其他通道处理" };
-
-    let aborted = false;
-    let onAbort: (() => void) | undefined;
-    const abortedEarly = new Promise<void>((resolve) => {
-      onAbort = () => {
-        aborted = true;
-        resolve();
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
+    return askViaCard({
+      registry: this.#approvals,
+      chatId,
+      req,
+      signal,
+      send: async (to, card) => (await channel.send(to, { card })).messageId,
+      settleCard: (messageId, status) => this.#settleCard(messageId, status),
     });
-
-    const id = `ap-${randomUUID()}`;
-    try {
-      const result = await channel.send(chatId, { card: buildApprovalCard(id, req) });
-      if (aborted) {
-        await this.#settleCard(result.messageId, "已在终端处理");
-        return { allow: false, reason: "已由其他通道处理" };
-      }
-      const pending = this.#approvals.register(id, result.messageId);
-      void abortedEarly.then(() => {
-        const messageId = this.#approvals.cancel(id, { allow: false, reason: "已由其他通道处理" });
-        if (messageId) void this.#settleCard(messageId, "已在终端处理");
-      });
-      return await pending;
-    } finally {
-      if (onAbort) signal.removeEventListener("abort", onAbort);
-    }
   }
 
   async #settleCard(messageId: string, status: string): Promise<void> {
