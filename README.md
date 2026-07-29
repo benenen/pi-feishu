@@ -31,7 +31,7 @@ pi install git:github.com/you/pi-feishu
 }
 ```
 
-一共 16 个键，按用途分四组。
+一共 18 个键，按用途分五组。
 
 ### 凭据
 
@@ -80,6 +80,8 @@ pi install git:github.com/you/pi-feishu
 |---|---|---|
 | `autoStart` | `false` | 会话启动时自动连接。**多开 pi 会抢消息** —— 同一个 appId 只有一条长连接，飞书把事件推给哪一条不确定，保持 `false` 更安全 |
 | `repoRoot` | 当前 cwd | 判定「写到范围外」的基准 |
+| `transport` | `"direct"` | `direct` 会话自己连飞书；`broker` 经本地 broker 进程共用一条长连接，多个会话可共用同一个飞书应用。详见下方「broker 模式」 |
+| `brokerSocket` | `<agentDir>/feishu-broker.sock` | 仅 `transport: "broker"` 用到。broker 进程监听的 Unix socket 路径。默认按 `getAgentDir()` 算出，**不是 cwd** —— broker 进程和各 pi 会话必须算出同一个路径才连得上，跨用户/跨 agent 目录部署时要显式填成同一个绝对路径 |
 
 ## 审批档位
 
@@ -154,6 +156,77 @@ TOKEN=$(curl -s -X POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_t
 curl -s -H "Authorization: Bearer $TOKEN" \
   'https://open.feishu.cn/open-apis/contact/v3/scopes?user_id_type=open_id' | jq .data.user_ids
 ```
+
+## broker 模式（`transport: "broker"`）
+
+上一节的前提是「一个飞书应用配一个 pi 会话」，根子在于**同一个 appId 只能有一条长连接**，
+飞书把事件推给哪条不确定。如果你就是想用**同一个飞书应用**同时服务多个 pi 会话（同一个人
+在同一个飞书对话里切换着跟不同项目的会话聊），direct 模式做不到，得换成 broker 模式：
+一个独立进程独占那条长连接，各 pi 会话经本地 Unix socket 接上它，收发消息和 chatId ↔ 会话的
+路由都交给它。
+
+### 部署方式
+
+broker 是一个不依赖 pi 进程存活的独立可执行入口：
+
+```bash
+node bin/broker.ts
+# 或作为已安装依赖的 bin 使用：
+pi-feishu-broker
+```
+
+它读的是跟扩展侧同一套配置文件（`~/.pi/agent/feishu.json` → `<项目>/.pi/feishu.json`），启动时
+连接飞书、在 `brokerSocket` 指定的路径监听，打印 `broker 已就绪：<socket 路径>` 后常驻，直到收到
+`SIGINT`/`SIGTERM`（`Ctrl-C` 或 `kill`）才会先关 socket 服务端、再断开飞书连接、然后退出。
+生产环境建议用 systemd / supervisor 之类的进程管理器托管，随机器重启自动拉起 —— broker 自己
+不会自动重连或自愈（见下）。
+
+各 pi 会话侧把 `transport` 配成 `"broker"` 即可，`brokerSocket` 通常不用填：默认按
+`getAgentDir()` 算出的路径与 broker 进程一致；如果 broker 进程和 pi 会话跑在不同的 agent 目录
+或不同用户下，两边必须显式配成同一个绝对路径，否则连不上。
+
+### socket 权限即鉴权
+
+broker 监听的 socket 文件建出来后立刻 `chmod 0600` —— 这是它**唯一**的鉴权手段：同一 Linux
+用户下的进程都能连、其他用户一律连不上。这意味着：
+
+- 同一用户下跑的**任何其他进程**（不限于 pi）只要连得上这个 socket，就能冒充某个已配对的
+  pi 会话收发飞书消息、发起审批。broker 模式默认信任「同一用户下的一切都是你自己的」，
+  不做更细粒度的进程级鉴权（没有 token，没有 `SO_PEERCRED` 校验）
+- 不要在多人共用同一个 Linux 账号的机器上用 broker 模式，除非你能保证同用户下不会跑到别人
+  的进程
+- 需要保密的是「谁能以这个用户身份跑代码」，socket 路径本身不构成秘密
+
+### broker 挂掉会怎样
+
+broker 挂了等于挂在它上面的**所有** pi 会话同时失联，**当前不做自动重连**：
+
+- 客户端网关发现连接断开后，把所有在途请求（发送中的消息、等待中的审批）一律 reject，
+  会话侧退回「飞书不可用」
+- 新连接不会自动重试；需要人工重新拉起 broker 进程，再在每个受影响的 pi 会话里重新执行
+  `/feishu start`（配对关系不保留，要重新走一遍配对码）
+- 自动重连、断线重试队列留待后续，目前是纯手工运维
+
+### `bindTarget` 的限制
+
+broker 模式下 `bindTarget` **只有 `"code"`（配对码）生效**，`operator`、`oc_xxx`、`none`
+三档配了也不生效 —— 因为绑定权在 broker 手里：一个飞书 chatId 该路由给哪个 pi 会话，只有
+broker 的路由表知道，会话侧没法单方面替它决定绑谁。`/feishu start` 会直接向 broker 要一个
+配对码并显示在终端，体验上与 direct 模式下 `bindTarget: "code"` 一致。
+
+### 该用 direct 还是 broker
+
+| | direct（默认） | broker |
+|---|---|---|
+| 部署 | 零额外进程，pi 会话自己连 | 需要单独起、管、护一个常驻进程 |
+| 一个飞书应用能配几个 pi 会话 | 1 个（长连接不能共用） | 多个，经同一个 broker 共用一条长连接 |
+| 某个 pi 会话挂了 | 只影响它自己 | 只影响它自己 |
+| broker 挂了 | 不涉及 | 挂在它上面的会话**全部**失联，需人工重启并重新配对 |
+| 鉴权 | 飞书侧白名单 + 卡片操作人白名单 | 前两者之外再加一层「同用户即信任」的 socket 权限 |
+| 适合场景 | 单会话，或愿意为每个项目配独立飞书应用 | 想用同一个飞书身份服务多个项目/会话，能接受多运维一个进程 |
+
+只有一个 pi 会话用飞书、或不介意一个项目配一个飞书应用时，direct 更简单，出问题的面更小。
+真正需要多个会话共用同一个飞书应用时才值得上 broker 模式这份运维成本。
 
 ## 配对码绑定（`bindTarget: "code"`）
 
@@ -237,3 +310,23 @@ Node ≥ 24（依赖原生 TypeScript 类型剥离，无构建步骤）。
 - [ ] 群场景：让**不在** `approverAllowlist` 里的成员点「允许」→ 无效，日志出现「忽略非授权审批人」
 - [ ] 仓库里建一个指向仓库外的符号链接目录，让 agent 往它下面写新文件 → 弹审批
 - [ ] `/feishu stop` 后飞书消息不再进入 pi
+
+### broker 模式（`transport: "broker"`）
+
+同样需要真实飞书应用；额外需要能起一个独立的长驻进程。逐项验证：
+
+- [ ] 终端 1：`node bin/broker.ts`（或 `node --experimental-strip-types bin/broker.ts`，
+      或安装后用 `pi-feishu-broker`）→ 打印 `broker 已就绪：<socket 路径>`
+- [ ] 终端 2：`stat -c '%a' <socket 路径>` → 输出 `600`
+- [ ] 项目 `.pi/feishu.json` 配 `transport: "broker"` 后启动 pi、跑 `/feishu start` →
+      终端打印配对码；在要绑定的飞书对话里发送该码 → 收到「配对成功」
+- [ ] 两个不同项目（或同一项目开两个终端）的 pi 会话都配同一个飞书应用 + `transport: "broker"`，
+      分别用各自的配对码绑到两个不同的飞书对话 → 分别发消息，各回各的，不串台
+- [ ] broker 模式下把 `bindTarget` 配成 `"operator"` 或某个 `oc_xxx` → 确认它被忽略，
+      `/feishu start` 仍然走配对码流程
+- [ ] 终端 1 按 `Ctrl-C` 停掉 broker 进程 → 已配对的 pi 会话再发消息应提示「飞书不可用」
+      （不会自动重连）
+- [ ] 重新拉起 broker、在受影响的 pi 会话里重新跑 `/feishu start` → 恢复正常，需要重新配对
+- [ ] 配置缺失（没有 `appId`/`appSecret`）时执行 `node bin/broker.ts` → 报出中文的
+      「缺少 appId（配置文件 appId 或环境变量 FEISHU_APP_ID）」之类的问题清单，退出码非零
+      （这一条不需要飞书凭据，随时可以自己跑）
