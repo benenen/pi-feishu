@@ -121,11 +121,12 @@ export class FeishuGateway {
     }
   }
 
-  async streamTurn(run: (sink: AppendSink) => Promise<void>): Promise<void> {
+  /** to 省略时发往已绑定会话；多会话模式下由 Bridge 传入本回合的来源 */
+  async streamTurn(run: (sink: AppendSink) => Promise<void>, to?: string): Promise<void> {
     const channel = this.#channel;
-    const to = this.#bound;
-    if (!channel || !to) return;
-    await channel.stream(to, { markdown: async (controller) => run(controller) });
+    const target = resolveTarget(this.#bound, to);
+    if (!channel || !target) return;
+    await channel.stream(target, { markdown: async (controller) => run(controller) });
   }
 
   /** to 省略时发往已绑定会话；回绝陌生会话时必须显式传对方 chatId */

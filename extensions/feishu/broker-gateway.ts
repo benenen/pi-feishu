@@ -146,7 +146,12 @@ export class BrokerGateway implements GatewayLike {
     await this.#awaitId(id);
   }
 
-  async streamTurn(run: (sink: AppendSink) => Promise<void>): Promise<void> {
+  /**
+   * broker 档收件方由 broker 的路由表决定（一个会话绑一个对话），用不上 to ——
+   * 但形参必须声明出来：少一个参数在 TS 里是合法赋值，漏掉不会报错，
+   * 运行期却会让所有回合都发去同一个对话。
+   */
+  async streamTurn(run: (sink: AppendSink) => Promise<void>, _to?: string): Promise<void> {
     // 未绑定就安静地什么都不做，对齐 FeishuGateway.streamTurn 的
     // `if (!channel || !to) return`。
     //
