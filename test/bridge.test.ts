@@ -5,6 +5,7 @@ import {
   bindToChat,
   Bridge,
   decideDelivery,
+  gateInbound,
   parseControlCommand,
   shouldAccept,
 } from "../extensions/feishu/bridge.ts";
@@ -518,4 +519,47 @@ test("steer 消息不占用来源槽位 —— 它不产生新回合", async () 
   await bridge.endTurn();
 
   assert.deepEqual(sink.streams, ["oc_dm", "oc_dm2"], "steer 压了槽位的话，这里会错位");
+});
+
+// ── 入站准入判定 ────────────────────────────────────────────────────
+
+test("已绑定的会话直接放行", () => {
+  assert.equal(
+    gateInbound({ bound: true, multiChat: false, requireCode: true, codePending: true, codeMatched: false }),
+    "pass",
+  );
+});
+
+test("multiChat 不要求配对 —— 它的语义就是全接，再要握手是自相矛盾", () => {
+  assert.equal(
+    gateInbound({ bound: false, multiChat: true, requireCode: true, codePending: true, codeMatched: false }),
+    "pass",
+  );
+});
+
+test("要求配对码时：码有效且匹配才算配对成功", () => {
+  assert.equal(
+    gateInbound({ bound: false, multiChat: false, requireCode: true, codePending: true, codeMatched: true }),
+    "pair-ok",
+  );
+  assert.equal(
+    gateInbound({ bound: false, multiChat: false, requireCode: true, codePending: true, codeMatched: false }),
+    "need-code",
+  );
+});
+
+test("配对码过期后必须继续挡着，不能变成谁先说话谁绑上", () => {
+  // 这是 fail-open：过期让 pending 变 false，整个配对分支被跳过，
+  // 下一条消息不需要任何码就绑上了 —— 门不是关得更严，而是没了
+  assert.equal(
+    gateInbound({ bound: false, multiChat: false, requireCode: true, codePending: false, codeMatched: false }),
+    "need-code",
+  );
+});
+
+test("不走配对码的档位（operator / oc_xxx / none）仍是首条消息即绑", () => {
+  assert.equal(
+    gateInbound({ bound: false, multiChat: false, requireCode: false, codePending: false, codeMatched: false }),
+    "pass",
+  );
 });

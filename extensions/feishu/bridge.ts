@@ -71,6 +71,38 @@ export function decideDelivery(
   return isStreaming ? { text, deliverAs: "followUp" } : { text };
 }
 
+/** 一条入站消息在准入这一层的三种去向 */
+export type InboundGate = "pair-ok" | "need-code" | "pass";
+
+/**
+ * 入站准入判定。把「要不要配对」这件事从 index.ts 的分支里拎出来，
+ * 因为它有两个反直觉的点，埋在接线代码里没人看得见：
+ *
+ * 1. **multiChat 不要求配对。** 它的语义就是「全接」，再要一次握手是自相矛盾 ——
+ *    先绑上的那个对话之外的消息本来就会被放行，只有第一个要握手毫无道理。
+ *    谁能触达由飞书侧的策略管道（dmMode / 白名单 / requireMention）决定。
+ *
+ * 2. **配对码过期后必须继续挡着。** 早先的写法是「有待配对码时才走配对分支」，
+ *    于是码一过期这个分支整个被跳过，下一条消息不需要任何码就绑上了 ——
+ *    到期让门消失而不是关得更严，是 fail-open。要重新拿码得回终端 /feishu pair。
+ */
+export function gateInbound(opts: {
+  /** 是否已经绑定过会话 */
+  bound: boolean;
+  multiChat: boolean;
+  /** bindTarget === "code" */
+  requireCode: boolean;
+  /** 当前是否有未过期的配对码 */
+  codePending: boolean;
+  /** 本条消息是否就是那个配对码 */
+  codeMatched: boolean;
+}): InboundGate {
+  if (opts.bound) return "pass";
+  if (opts.multiChat) return "pass";
+  if (!opts.requireCode) return "pass";
+  return opts.codePending && opts.codeMatched ? "pair-ok" : "need-code";
+}
+
 export function shouldAccept(
   gateway: { boundChatId?: string },
   chatId: string,

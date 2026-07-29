@@ -14,6 +14,7 @@ import {
   bindToChat,
   Bridge,
   decideDelivery,
+  gateInbound,
   parseControlCommand,
   shouldAccept,
 } from "./bridge.ts";
@@ -181,15 +182,27 @@ export default function (pi: ExtensionAPI) {
           // pairing（配对在 broker 侧靠 registry.matchCode + bound 帧完成），
           // 且 broker 对未绑定会话的消息本就不会转发 message 帧过来（见
           // broker/server.ts 的 deliver()），所以这里永远走不到。
-          if (gw.boundChatId === undefined && pairing?.pending === true) {
-            if (pairing.match(msg.text)) {
-              gw.bind(msg.chatId);
-              log(`配对成功，已绑定 ${msg.chatId}`);
-              await gw.sendText("配对成功，本对话已绑定该 pi 会话。", msg.chatId);
-            } else {
-              // 不回显配对码，只提示需要配对
-              await gw.sendText("该 pi 会话尚未配对，请发送终端上显示的配对码。", msg.chatId);
-            }
+          // 注意 match() 是一次性的，只有真要判定时才调，别在条件里顺手调用
+          const gate = gateInbound({
+            bound: gw.boundChatId !== undefined,
+            multiChat: cfg.multiChat,
+            requireCode: cfg.bindTarget === "code",
+            codePending: pairing?.pending === true,
+            codeMatched: pairing?.pending === true && pairing.match(msg.text),
+          });
+          if (gate === "pair-ok") {
+            gw.bind(msg.chatId);
+            log(`配对成功，已绑定 ${msg.chatId}`);
+            await gw.sendText("配对成功，本对话已绑定该 pi 会话。", msg.chatId);
+            return;
+          }
+          if (gate === "need-code") {
+            // 不回显配对码。过期与不匹配给同一句话，但要说清楚去哪拿新的
+            await gw.sendText(
+              "该 pi 会话尚未配对。请发送终端上显示的配对码；" +
+                "码已过期的话，在终端跑 /feishu pair 取一个新的。",
+              msg.chatId,
+            );
             return;
           }
 
