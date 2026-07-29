@@ -407,7 +407,8 @@ test("流式失败时补发的全文也发回同一个来源", async () => {
   };
   const bridge = new Bridge(MULTI, failing, () => {}, () => 0, 1000);
 
-  bridge.startTurn("oc_group");
+  bridge.noteInboundOrigin("oc_group");
+  bridge.startTurn();
   bridge.onTextDelta("结果");
   await bridge.endTurn();
 
@@ -424,7 +425,8 @@ test("审批卡片发到触发该回合的那个对话", async () => {
     1000,
   );
 
-  bridge.startTurn("oc_group");
+  bridge.noteInboundOrigin("oc_group");
+  bridge.startTurn();
   await bridge.gateToolCall("bash", { command: "rm -rf x" }, undefined);
 
   assert.deepEqual(asks, ["oc_group"], "审批卡片弹错对话，就是让不相干的人看见并批准");
@@ -480,4 +482,34 @@ test("不走配对码的档位（operator / oc_xxx / none）仍是首条消息�
     gateInbound({ bound: false, multiChat: false, requireCode: false, codePending: false, codeMatched: false }),
     "pass",
   );
+});
+
+test("终端输入清掉来源 —— 不能沿用上一条飞书消息的对话", async () => {
+  const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
+  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
+
+  bridge.noteInboundOrigin("oc_group");
+  bridge.startTurn();
+  await bridge.endTurn();
+
+  bridge.clearInboundOrigin(); // 终端敲了一句
+  bridge.startTurn();
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_group", undefined]);
+});
+
+test("两条来自不同对话的消息，各自的回合回各自的对话", async () => {
+  const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
+  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
+
+  bridge.noteInboundOrigin("oc_dm");
+  bridge.startTurn();
+  await bridge.endTurn();
+
+  bridge.noteInboundOrigin("oc_group");
+  bridge.startTurn();
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_dm", "oc_group"]);
 });

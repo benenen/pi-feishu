@@ -193,6 +193,21 @@ interface TurnState {
 
 export class Bridge {
   #turn: TurnState | undefined;
+  /**
+   * 最近一次飞书入站消息的来源。终端输入会把它清掉。
+   *
+   * 试过两种「更聪明」的做法都栽了，原因都是**赌了 pi 的内部顺序**：
+   *   - FIFO 队列：要求「一个回合恰好一个槽位」，steer/followUp 被合并就破
+   *   - 会话条目倒推：要求 agent_start 时触发这轮的用户消息已在 getEntries() 里，
+   *     实测不成立（解析恒为「无」，于是всё 回落到已绑定会话）
+   * pi 的 agent_start 是空事件、sendUserMessage 收不了元数据，这个映射上游不提供。
+   * 所以退回不依赖任何顺序假设的最小模型：谁最后说话，这个回合就回给谁。
+   *
+   * 已知边界：两个对话几乎同时发消息且都排队时，先跑的那个回合会回给后说话的那个。
+   * 单人使用（自己的私聊 + 自己在的群）碰不到；多人共用要严格隔离请用 broker 模式。
+   */
+  #lastOrigin: string | undefined;
+
   /** 当前回合的出站目标 */
   #turnTarget: string | undefined;
   #toolStartedAt = new Map<string, number>();
@@ -251,15 +266,20 @@ export class Bridge {
     });
   }
 
-  /**
-   * @param target 本回合的出站目标。由调用方从 pi 的会话条目里解析（见 origin.ts）——
-   * 那是 pi 实际处理消息的顺序，比在旁边维护队列或按文本匹配都可靠。
-   * undefined 表示这个回合不是飞书消息触发的（终端敲的），走网关的默认收件方。
-   */
-  startTurn(target?: string): void {
+  /** 转发入站消息给 pi 之前调用，记下这条消息来自哪个对话 */
+  noteInboundOrigin(chatId: string): void {
+    this.#lastOrigin = chatId;
+  }
+
+  /** 终端敲的输入没有飞书来源，必须清掉 —— 否则会沿用上一条飞书消息的对话 */
+  clearInboundOrigin(): void {
+    this.#lastOrigin = undefined;
+  }
+
+  startTurn(): void {
     if (this.#turn) return;
     this.#turnApproved = false;
-    this.#turnTarget = target;
+    this.#turnTarget = this.#lastOrigin;
     const stream = new TurnStream();
     const turn: TurnState = {
       stream,
