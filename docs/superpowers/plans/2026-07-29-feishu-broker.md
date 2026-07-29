@@ -1889,3 +1889,27 @@ git commit -m "feat(broker): 进程入口与文档"
 - **Windows 未验证**。`net` 在 Windows 上要用命名管道路径（`\\.\pipe\...`），且没有 `chmod` 语义。broker 模式先只声明支持 Linux/macOS。
 - **图片经 base64 走 socket**。大图会在两端各占一份内存副本；当前图片本来就要整块读进内存，没有变差，但不适合超大文件。
 - `bindTarget` 的 `operator` / `oc_xxx` / `none` 三档在 broker 模式下**不生效**，只支持配对码。绑定权在 broker，会话侧无法单方面决定绑谁。
+
+---
+
+## 实施后遗留（终审复审记录，非阻塞）
+
+本计划已实施完毕并通过整支分支终审。以下三条是终审复审明确判为「可下一波处理」的遗留项，
+记录在此以免随过程台账一起丢失：
+
+1. **卡片鉴权仍有一个未覆盖场景**：会话绑定 chat X 时弹出审批卡片 → 操作员改绑到 chat Y →
+   X 里那张陈旧卡片仍可被 `approverAllowlist` 内的人点「允许」并生效。
+   `ApprovalRegistry` 现在按 chatId 登记，但这张卡片本来就发往 X、来自 X 的点击与登记一致，
+   所以挡不住。风险边界清楚（仅限已授权审批人、且仅限该会话曾经绑过的对话，不是权限外溢）。
+   最小修法不是「解绑时撤销全部未决审批」，而是**登记时一并记下发起 ask 的连接 id，
+   settle 时复查 `registry.boundChatOf(connId) === event.chatId`** —— `server.ts` 在那个位置
+   已经拿得到这个值。
+
+2. **`server.ts` 里 `#send(displaced, {t:"unbound"})` 当前不可达**：`deliver()` 会先命中
+   `byChat` 直接投给 owner，轮不到 `matchCode` 分支。`registry.bind()` 返回被顶掉会话 id
+   这个契约本身是对的且有真测试，所以代码该留而不是删 —— 它是给将来放开
+   「已绑对话内换绑」时的防御。**但调用点缺一句注释说明这一点**，现在只写在测试注释里。
+
+3. **`#dispatch` 的 docstring 措辞不精确**：写的是「带 id 的请求必须收到 ok/err 之一」，
+   但 `stream_begin` 的成功路径刻意不回响应（响应挂在 `stream_end` 的同 id 上）。
+   客户端不 await 它，不会挂起，但注释该说清楚这个例外。
