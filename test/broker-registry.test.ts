@@ -130,3 +130,19 @@ test("重复 add 同一个 id 不会留下陈旧的 chatId 路由", () => {
   assert.equal(r.byChat("oc_1"), undefined, "旧路由必须被清掉，否则两个索引会互相矛盾");
   assert.equal(r.boundChatOf("s1"), undefined);
 });
+
+test("bind 交回被顶掉的会话 id —— 不告诉它，它就会一直以为自己还绑着", () => {
+  const r = makeRegistry();
+  r.add(A);
+  r.add(B);
+  assert.equal(r.bind("s1", "oc_1"), undefined, "没顶掉谁就不该返回 id");
+  assert.equal(r.bind("s2", "oc_1"), "s1", "s1 被顶掉了，调用方要据此给它发 unbound");
+});
+
+test("bind：同一会话换绑、或重复绑同一个 chat，都不算顶掉别人", () => {
+  const r = makeRegistry();
+  r.add(A);
+  r.bind("s1", "oc_1");
+  assert.equal(r.bind("s1", "oc_1"), undefined, "绑给自己不算顶掉");
+  assert.equal(r.bind("s1", "oc_2"), undefined, "自己换绑也不算顶掉");
+});

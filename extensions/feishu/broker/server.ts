@@ -145,7 +145,11 @@ export class BrokerServer {
 
     const paired = this.#registry.matchCode(msg.text);
     if (paired) {
-      this.#registry.bind(paired.id, msg.chatId);
+      // 被顶掉的会话必须被告知：静默置为未绑定的话，它本地的 #bound 还留着旧
+      // chatId、status 照样说「已绑定」，而每次 sendText 都拿到「未绑定会话」，
+      // 且再也收不到任何消息。
+      const displaced = this.#registry.bind(paired.id, msg.chatId);
+      if (displaced !== undefined) this.#send(displaced, { t: "unbound" });
       this.#send(paired.id, { t: "bound", chatId: msg.chatId });
       // 单会话版 index.ts 在绑定成功时会给飞书发确认，broker 版沿用同样的体验：
       // 用户输完配对码得有反馈，不能指望会话自己记得回一句。
@@ -238,7 +242,20 @@ export class BrokerServer {
         return;
 
       case "send_text": {
-        const chatId = f.to ?? this.#registry.boundChatOf(conn.id);
+        const bound = this.#registry.boundChatOf(conn.id);
+        // to 只能是本会话自己绑的那个 chat。不校验的话 send_text 就是一个不受
+        // 绑定关系约束的跨会话写入原语：任何连上 socket 的进程都能以机器人身份
+        // 往别人绑定的对话里发消息，连「自己是否绑定过」都不要求。
+        // 被 socket 0600 挡着，但它是 listen()→chmod 那个 TOCTOU 窗口唯一有
+        // 杀伤力的落点；而正常用法里 to 的取值本来就恒等于已绑的 chat。
+        if (f.to !== undefined && f.to !== bound) {
+          return this.#send(conn.id, {
+            t: "err",
+            id: f.id,
+            message: "收件会话不是本会话绑定的对话",
+          });
+        }
+        const chatId = f.to ?? bound;
         if (chatId === undefined) return this.#send(conn.id, { t: "err", id: f.id, message: "未绑定会话" });
         await this.#channel.sendText(chatId, f.markdown);
         this.#send(conn.id, { t: "ok", id: f.id });

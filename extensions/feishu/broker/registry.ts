@@ -84,21 +84,34 @@ export class SessionRegistry {
     return undefined;
   }
 
-  bind(id: string, chatId: string): void {
+  /**
+   * 返回**被顶掉绑定的那个会话 id**（没顶掉谁时是 undefined）。
+   *
+   * 调用方必须据此给它发一帧 unbound：静默置为未绑定的话，那个会话本地的
+   * #bound 还留着旧 chatId、`/feishu status` 照样说「已绑定」，而它此后每次
+   * sendText 都会拿到「未绑定会话」，且再也收不到任何消息 —— 一个从用户角度
+   * 完全无法解释的状态。
+   */
+  bind(id: string, chatId: string): string | undefined {
     const e = this.#entries.get(id);
-    if (!e) return;
+    if (!e) return undefined;
 
     // 该 chatId 原先属于别的会话 —— 把那个会话置为未绑定
+    let displaced: string | undefined;
     const prevOwner = this.#byChat.get(chatId);
     if (prevOwner !== undefined && prevOwner !== id) {
       const prev = this.#entries.get(prevOwner);
-      if (prev) prev.chatId = undefined;
+      if (prev) {
+        prev.chatId = undefined;
+        displaced = prevOwner;
+      }
     }
     // 本会话原先绑着别的 chat —— 清掉旧路由
     if (e.chatId !== undefined && e.chatId !== chatId) this.#byChat.delete(e.chatId);
 
     e.chatId = chatId;
     this.#byChat.set(chatId, id);
+    return displaced;
   }
 
   unbind(id: string): void {

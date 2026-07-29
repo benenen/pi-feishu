@@ -511,3 +511,88 @@ test("孤儿 stream_chunk 每个 id 只记一次日志 —— 不能一个回合
     await server.close();
   }
 });
+
+test("send_text 的 to 只能是本会话已绑的 chat —— 它不是跨会话写入原语", async () => {
+  // f.to 不校验的话，任何连上 socket 的进程都能以机器人身份往**别人**绑定的
+  // 对话里发消息，连「自己是否绑定过」都不要求。socket 0600 挡住了外人，
+  // 但它是 listen()→chmod 那个 TOCTOU 窗口唯一有杀伤力的落点。
+  const sent: Array<{ chatId: string; text: string }> = [];
+  const server = new BrokerServer({ channel: fakeChannel(sent), pairingTtlMs: 600_000, log: () => {} });
+  const p = tmpSock();
+  await server.listen(p);
+
+  // 会话 A 绑到 oc_1
+  const a = await connect(p);
+  const b = await connect(p);
+  try {
+    a.send({ t: "hello", cwd: "/a", label: "A" });
+    await a.waitFor("hello_ok");
+    a.send({ t: "pair_request", id: "1" });
+    const code = (await a.waitFor("pair_code")) as { code: string };
+    server.deliver({ chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+    await a.waitFor("bound");
+    sent.length = 0;
+
+    // 会话 B 从未配对，却指名往 oc_1 发
+    b.send({ t: "hello", cwd: "/b", label: "B" });
+    await b.waitFor("hello_ok");
+    b.send({ t: "send_text", id: "9", markdown: "冒名顶替", to: "oc_1" });
+    const err = (await b.waitFor("err")) as { id: string; message: string };
+    assert.equal(err.id, "9");
+    assert.deepEqual(sent, [], "一个字都不该发出去");
+
+    // 自己绑的那个 chat 仍然可以显式指名（回绝陌生会话等场景要用）
+    a.send({ t: "send_text", id: "10", markdown: "正常", to: "oc_1" });
+    await a.waitFor("ok");
+    assert.deepEqual(sent, [{ chatId: "oc_1", text: "正常" }]);
+  } finally {
+    a.sock.destroy();
+    b.sock.destroy();
+    await server.close();
+  }
+});
+
+test("接手别人让出来的 chat 时，不该给任何人发多余的 unbound", async () => {
+  // I5 的正面用例（顶替时通知被顶掉的会话）在 registry 层测：deliver() 现在
+  // 的路由让顶替走不到 —— 已绑 chat 里的消息会直接投给 owner，压根轮不到
+  // matchCode。这里钉住的是反面：正常的「让出→接手」不能误发 unbound，
+  // 否则刚接手的会话会立刻把自己的 #bound 清掉。
+  const server = new BrokerServer({ channel: fakeChannel([]), pairingTtlMs: 600_000, log: () => {} });
+  const p = tmpSock();
+  await server.listen(p);
+  const a = await connect(p);
+  const b = await connect(p);
+  try {
+    a.send({ t: "hello", cwd: "/a", label: "A" });
+    await a.waitFor("hello_ok");
+    a.send({ t: "pair_request", id: "1" });
+    const codeA = (await a.waitFor("pair_code")) as { code: string };
+    server.deliver({ chatId: "oc_1", senderId: "ou_1", text: codeA.code, imageKeys: [] });
+    await a.waitFor("bound");
+
+    // A 主动解绑把 oc_1 让出来（这一条 unbound 是它自己要来的）
+    a.send({ t: "unbind" });
+    await a.waitFor("unbound");
+    const unboundAfterOwnRequest = a.frames.filter((f) => f.t === "unbound").length;
+
+    // B 拿自己的码接手 oc_1
+    b.send({ t: "hello", cwd: "/b", label: "B" });
+    await b.waitFor("hello_ok");
+    b.send({ t: "pair_request", id: "1" });
+    const codeB = (await b.waitFor("pair_code")) as { code: string };
+    server.deliver({ chatId: "oc_1", senderId: "ou_1", text: codeB.code, imageKeys: [] });
+    await b.waitFor("bound");
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(
+      a.frames.filter((f) => f.t === "unbound").length,
+      unboundAfterOwnRequest,
+      "A 早就让出去了，不该再收到一条 unbound",
+    );
+    assert.equal(b.frames.filter((f) => f.t === "unbound").length, 0, "刚绑上的会话不能被自己踢掉");
+  } finally {
+    a.sock.destroy();
+    b.sock.destroy();
+    await server.close();
+  }
+});
