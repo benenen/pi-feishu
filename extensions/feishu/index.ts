@@ -20,6 +20,7 @@ import {
 } from "./bridge.ts";
 import { renderStatus, renderUnbindNotice } from "./renderer.ts";
 import { createPairing, type Pairing } from "./pairing.ts";
+import { ORIGIN_ENTRY_TYPE, resolveOrigin } from "./origin.ts";
 import type { Asker } from "./approval.ts";
 
 /** 会话切换时等待断开的上限，防止飞书 API 挂住把 /new 一起冻住 */
@@ -244,7 +245,9 @@ export default function (pi: ExtensionAPI) {
           // 影响消息处理，react 内部已自兜异常
           void gw.react?.(msg.messageId, cfg.readReceiptEmoji);
 
-          br.noteInboundOrigin(text, msg.chatId);
+          // 把来源写进会话条目，agent_start 时按位置倒推回来。
+          // 普通自定义条目不进 LLM 上下文，所以 chatId 不会污染 agent 看到的对话
+          pi.appendEntry(ORIGIN_ENTRY_TYPE, { chatId: msg.chatId });
           await pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
         } catch (err) {
           log(`处理入站消息失败：${String(err)}`, "error");
@@ -404,7 +407,11 @@ export default function (pi: ExtensionAPI) {
     bridge?.onUserPrompt(event.text, event.source === "extension" ? "feishu" : "interactive");
   });
 
-  pi.on("agent_start", () => bridge?.startTurn());
+  pi.on("agent_start", (_event, ctx) => {
+    // 来源从会话条目里解析 —— pi 的 agent_start 不带触发者信息，而会话条目
+    // 记录的是它实际处理消息的顺序
+    bridge?.startTurn(resolveOrigin(ctx.sessionManager.getEntries()));
+  });
 
   pi.on("message_update", (event) => {
     const e = event.assistantMessageEvent;

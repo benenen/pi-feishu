@@ -193,17 +193,6 @@ interface TurnState {
 
 export class Bridge {
   #turn: TurnState | undefined;
-  /**
-   * 已转发给 pi、等待被 input 事件认领的入站来源，按**消息原文**关联。
-   *
-   * 不用 FIFO 队列是因为它要求「一个回合恰好对应一个槽位」，而这个前提站不住：
-   * 一条消息被并进正在跑的回合（steer，或 followUp 被合并）时不会产生新回合，
-   * 它占的槽位就永远没人认领，之后每个回合全部错位一位 —— 症状是「群里问的，
-   * 答案发到私聊里」。而 pi 的 input 事件带着我们发出去的原文，能精确对上。
-   */
-  #pendingOrigins: { text: string; chatId: string }[] = [];
-  /** 最近一次认领到的来源；开新回合时快照给该回合 */
-  #nextTarget: string | undefined;
   /** 当前回合的出站目标 */
   #turnTarget: string | undefined;
   #toolStartedAt = new Map<string, number>();
@@ -262,15 +251,15 @@ export class Bridge {
     });
   }
 
-  /** 转发入站消息给 pi 之前调用，按原文登记这条消息的来源 */
-  noteInboundOrigin(text: string, chatId: string): void {
-    this.#pendingOrigins.push({ text, chatId });
-  }
-
-  startTurn(): void {
+  /**
+   * @param target 本回合的出站目标。由调用方从 pi 的会话条目里解析（见 origin.ts）——
+   * 那是 pi 实际处理消息的顺序，比在旁边维护队列或按文本匹配都可靠。
+   * undefined 表示这个回合不是飞书消息触发的（终端敲的），走网关的默认收件方。
+   */
+  startTurn(target?: string): void {
     if (this.#turn) return;
     this.#turnApproved = false;
-    this.#turnTarget = this.#nextTarget;
+    this.#turnTarget = target;
     const stream = new TurnStream();
     const turn: TurnState = {
       stream,
@@ -290,16 +279,6 @@ export class Bridge {
   }
 
   onUserPrompt(text: string, source: "interactive" | "feishu"): void {
-    // 来源在这里认领：input 事件带着我们发出去的原文，能精确对上是哪个对话发的。
-    // 终端输入没有飞书来源，必须清掉 —— 否则它会沿用上一条飞书消息的目标，
-    // 把终端回合的输出发进那个对话
-    if (source === "interactive") {
-      this.#nextTarget = undefined;
-    } else {
-      const i = this.#pendingOrigins.findIndex((o) => o.text === text);
-      if (i !== -1) this.#nextTarget = this.#pendingOrigins.splice(i, 1)[0]?.chatId;
-    }
-
     const rendered = renderUserPrompt(text, source);
     if (rendered !== null) this.#push(rendered);
   }

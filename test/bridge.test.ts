@@ -396,60 +396,6 @@ function targetTrackingGateway(sink: {
 
 const MULTI = { ...CONFIG, multiChat: true };
 
-test("多会话：按消息原文关联来源，两个回合分别流回各自的对话", async () => {
-  const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
-  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
-
-  bridge.noteInboundOrigin("跑测试", "oc_dm");
-  bridge.onUserPrompt("跑测试", "feishu");
-  bridge.startTurn();
-  await bridge.endTurn();
-
-  bridge.noteInboundOrigin("看日志", "oc_group");
-  bridge.onUserPrompt("看日志", "feishu");
-  bridge.startTurn();
-  await bridge.endTurn();
-
-  assert.deepEqual(sink.streams, ["oc_dm", "oc_group"]);
-});
-
-test("终端发起的回合走默认收件方，不会认领飞书来源", async () => {
-  const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
-  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
-
-  bridge.noteInboundOrigin("跑测试", "oc_dm");   // 飞书消息已登记但回合还没开
-  bridge.onUserPrompt("看下日志", "interactive"); // 终端先开了一个回合
-  bridge.startTurn();
-  await bridge.endTurn();
-
-  assert.deepEqual(sink.streams, [undefined], "终端的回合绝不能借用飞书的来源");
-});
-
-test("消息被并进正在跑的回合（followUp/steer 都可能）也不会让后续错位", async () => {
-  const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
-  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
-
-  bridge.noteInboundOrigin("第一条", "oc_dm");
-  bridge.onUserPrompt("第一条", "feishu");
-  bridge.startTurn();
-  // 回合进行中群里又来一条，被并进当前回合、没有开新回合
-  bridge.noteInboundOrigin("第二条", "oc_group");
-  bridge.onUserPrompt("第二条", "feishu");
-  await bridge.endTurn();
-
-  // 下一个回合来自私聊
-  bridge.noteInboundOrigin("第三条", "oc_dm");
-  bridge.onUserPrompt("第三条", "feishu");
-  bridge.startTurn();
-  await bridge.endTurn();
-
-  assert.deepEqual(
-    sink.streams,
-    ["oc_dm", "oc_dm"],
-    "按文本关联时，没开成回合的那条不会占位，第三条仍然回私聊",
-  );
-});
-
 test("流式失败时补发的全文也发回同一个来源", async () => {
   const texts: { text: string; to?: string }[] = [];
   const gw = targetTrackingGateway({ streams: [], texts, asks: [] });
@@ -461,9 +407,7 @@ test("流式失败时补发的全文也发回同一个来源", async () => {
   };
   const bridge = new Bridge(MULTI, failing, () => {}, () => 0, 1000);
 
-  bridge.noteInboundOrigin("x", "oc_group");
-  bridge.onUserPrompt("x", "feishu");
-  bridge.startTurn();
+  bridge.startTurn("oc_group");
   bridge.onTextDelta("结果");
   await bridge.endTurn();
 
@@ -480,9 +424,7 @@ test("审批卡片发到触发该回合的那个对话", async () => {
     1000,
   );
 
-  bridge.noteInboundOrigin("x", "oc_group");
-  bridge.onUserPrompt("x", "feishu");
-  bridge.startTurn();
+  bridge.startTurn("oc_group");
   await bridge.gateToolCall("bash", { command: "rm -rf x" }, undefined);
 
   assert.deepEqual(asks, ["oc_group"], "审批卡片弹错对话，就是让不相干的人看见并批准");
