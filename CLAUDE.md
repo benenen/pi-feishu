@@ -90,6 +90,23 @@ pi 的 TUI 不接管 stderr，`console.error` 会直接打进渲染区（光标�
 对策：`shouldDefer` 判定为真时不投给 pi，扣在 `DeferredQueue` 里，等 `agent_settled`
 再作为新 prompt 发出去，自然开出新的 `agent_start`。
 
+### 「飞书流开着」和「pi 忙不忙」是两个生命周期，混用会丢消息
+
+- `isStreaming` —— `agent_start` → `agent_end`，只管飞书流的渲染
+- `isAgentActive` —— `agent_start` → **`agent_settled`**，才是 pi 的运行
+
+后者活得久：`agent_end` 之后 pi 还可能自动重试或压缩上下文
+（`_handlePostAgentRun` 用 `agent.continue()` 再开一轮），`_isAgentRunActive` 要到
+`_emitAgentSettled` 才置 false。而 `endTurn` 一进来就把 `#turn` 清了，之后还要等
+流式收尾（上限 15s）—— 所以窗口能有十几秒。
+
+这段窗口里用 `isStreaming` 判定的话，`decideDelivery` 会认为「空闲」而不带
+`deliverAs` 直接发，`prompt()` 抛 `Agent is already processing`，异常被入站
+handler 的 catch 吞掉，**消息就没了**。
+
+凡是「pi 现在能不能收一条新 prompt」的判断一律用 `isAgentActive`。
+`decideDelivery` 的参数因此叫 `agentActive` 而不是 `isStreaming`。
+
 两个点不能改错：
 
 - **必须是 `agent_settled`，不能是 `agent_end`。** `_emitAgentSettled` 是先把

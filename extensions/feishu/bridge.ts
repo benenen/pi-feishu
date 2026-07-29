@@ -67,15 +67,20 @@ export function parseControlCommand(text: string): ControlCommand | undefined {
   return { kind: "help" };
 }
 
+/**
+ * `agentActive` 问的是「**pi** 忙不忙」（agent_start → agent_settled），
+ * 不是「飞书流开着没」。传错会丢消息：agent_end 之后 pi 仍可能在自动重试，
+ * 那时不带 deliverAs 直接发，`prompt()` 抛 "Agent is already processing"。
+ */
 export function decideDelivery(
   text: string,
-  isStreaming: boolean,
+  agentActive: boolean,
 ): { text: string; deliverAs?: "steer" | "followUp" } {
   if (text.startsWith("!")) {
     const stripped = text.slice(1).trim();
-    return isStreaming ? { text: stripped, deliverAs: "steer" } : { text: stripped };
+    return agentActive ? { text: stripped, deliverAs: "steer" } : { text: stripped };
   }
-  return isStreaming ? { text, deliverAs: "followUp" } : { text };
+  return agentActive ? { text, deliverAs: "followUp" } : { text };
 }
 
 export function shouldAccept(
@@ -219,7 +224,24 @@ export class Bridge {
    */
   #turnApproved = false;
 
-  /** ExtensionAPI 不暴露流式状态，这里自己跟踪 */
+  /**
+   * pi 的 agent 运行是否还在进行：`agent_start` → `agent_settled`。
+   *
+   * **比 `isStreaming` 活得久**，这两个是不同的生命周期，混用过一次就丢消息：
+   * `agent_end` 之后 pi 还可能自动重试或压缩上下文（`_handlePostAgentRun` 会用
+   * `agent.continue()` 再开一轮），`_isAgentRunActive` 要到 `_emitAgentSettled`
+   * 才置 false。这段窗口里不带 `deliverAs` 直接发，`prompt()` 会抛
+   * "Agent is already processing"，消息就没了。
+   *
+   * 窗口不短：`endTurn` 一进来就把 `#turn` 清了，之后还要等流式收尾（上限 15s）。
+   */
+  #agentActive = false;
+
+  get isAgentActive(): boolean {
+    return this.#agentActive;
+  }
+
+  /** 飞书流是否开着：`agent_start` → `agent_end`。只管渲染，别拿它判断 pi 忙不忙 */
   get isStreaming(): boolean {
     return this.#turn !== undefined;
   }
@@ -283,14 +305,19 @@ export class Bridge {
    * （已绑定会话）。终端敲字发起的回合正是这种情况。
    */
   get turnTarget(): string | undefined {
-    if (!this.#turn) return undefined;
+    if (!this.#agentActive) return undefined;
     return this.#turnTarget ?? this.#gateway.boundChatId;
+  }
+
+  /** pi 的运行彻底结束（agent_settled）时调用 */
+  settleAgent(): void {
+    this.#agentActive = false;
   }
 
   /** 这条消息是否该扣住，等当前回合跑完再单独成回合。理由见 deferred.ts */
   shouldDefer(chatId: string): boolean {
     return shouldDefer({
-      streaming: this.isStreaming,
+      streaming: this.isAgentActive,
       turnTarget: this.turnTarget,
       chatId,
     });
@@ -312,6 +339,9 @@ export class Bridge {
   }
 
   startTurn(): void {
+    // 一次运行里自动重试会开多个回合，所以这行要在下面的去重之前 ——
+    // 它跟的是 pi 的运行，不是飞书流
+    this.#agentActive = true;
     if (this.#turn) return;
     this.#turnApproved = false;
     this.#turnTarget = this.#lastOrigin;

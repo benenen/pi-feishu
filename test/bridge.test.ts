@@ -593,3 +593,60 @@ test("停止桥接时，扣住的消息要能全部取出来告知发送者", ()
   assert.equal(stranded.length, 2, "静默丢掉的话，两个人都在等一个永远不来的回复");
   assert.equal(bridge.takeDeferred(), undefined);
 });
+
+// ── pi 的运行还没结束，但飞书流已经收尾的那段窗口 ────────────────────
+
+test("agent_end 之后 pi 仍可能在忙，isAgentActive 要撑到 settled", async () => {
+  // pi 的 _isAgentRunActive 是在 agent_settled 之前才置 false 的；
+  // agent_end 之后还可能自动重试、压缩上下文，这段时间不带 deliverAs 直接发
+  // 会被 prompt() 抛 "Agent is already processing"，消息就丢了
+  const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
+
+  bridge.noteInboundOrigin("oc_dm");
+  bridge.startTurn();
+  assert.equal(bridge.isAgentActive, true);
+
+  await bridge.endTurn();
+  assert.equal(bridge.isStreaming, false, "飞书流已收尾");
+  assert.equal(bridge.isAgentActive, true, "但 pi 还没 settled，此时直接发会抛");
+
+  bridge.settleAgent();
+  assert.equal(bridge.isAgentActive, false);
+});
+
+test("窗口期内来自别的对话的消息仍然要扣住", async () => {
+  const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
+  bridge.noteInboundOrigin("oc_dm");
+  bridge.startTurn();
+  await bridge.endTurn();
+
+  assert.equal(bridge.shouldDefer("oc_group"), true, "窗口期放行会把答案发错地方");
+  assert.equal(bridge.turnTarget, "oc_dm", "窗口期要仍然知道上一轮发往哪儿");
+});
+
+test("settled 之后恢复正常，不再扣任何消息", async () => {
+  const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
+  bridge.noteInboundOrigin("oc_dm");
+  bridge.startTurn();
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  assert.equal(bridge.shouldDefer("oc_group"), false);
+  assert.equal(bridge.turnTarget, undefined);
+});
+
+test("一次运行里的自动重试会开多个回合，settled 只来一次", async () => {
+  // pi 的 _handlePostAgentRun 会用 agent.continue() 再开一轮，
+  // 于是 agent_start/agent_end 成对出现多次，agent_settled 只有一次
+  const bridge = new Bridge(MULTI, targetTrackingGateway(emptySink()), () => {}, () => 0, 1000);
+  bridge.noteInboundOrigin("oc_dm");
+
+  bridge.startTurn();
+  await bridge.endTurn();
+  bridge.startTurn();
+  await bridge.endTurn();
+  assert.equal(bridge.isAgentActive, true, "中间那次 agent_end 不代表 pi 闲下来了");
+
+  bridge.settleAgent();
+  assert.equal(bridge.isAgentActive, false);
+});

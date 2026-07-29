@@ -235,7 +235,10 @@ export default function (pi: ExtensionAPI) {
           }
 
           const content = await br.toPromptContent(msg);
-          const { text, deliverAs } = decideDelivery(content, br.isStreaming);
+          // 用 isAgentActive 而不是 isStreaming：agent_end 之后 pi 还可能在
+          // 自动重试/压缩上下文，那段窗口里不带 deliverAs 直接发会被
+          // prompt() 抛 "Agent is already processing"，消息就丢了
+          const { text, deliverAs } = decideDelivery(content, br.isAgentActive);
           if (text === "") return;
           // 开始处理就给这条消息加个「在看」的表情 —— 飞书没有给机器人
           // 「标记已读」的接口，表情是通行做法。fire-and-forget：加不上不该
@@ -321,7 +324,9 @@ export default function (pi: ExtensionAPI) {
       boundChatId: gateway?.boundChatId,
       boundChatName: await gateway?.describeBoundChat(),
       pairingPending: pairing?.pending,
-      streaming: bridge?.isStreaming,
+      // 报 isAgentActive 而不是 isStreaming：飞书流收尾后 pi 可能还在自动重试，
+      // 那会儿说「空闲」但下一条消息却被扣住，对不上
+      streaming: bridge?.isAgentActive,
       turnApproved: bridge?.turnApproved,
       // gateway 存在只说明「启动过」，broker 掉了它照样是 truthy
       brokerConnected: gateway instanceof BrokerGateway ? gateway.connected : undefined,
@@ -461,7 +466,11 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_settled", async () => {
     const br = bridge;
     const gw = gateway;
-    if (!br || !gw) return;
+    if (!br) return;
+    // 先记下 pi 已经闲下来了，再决定放不放行 —— 漏了这句，之后所有消息
+    // 都会被当成「回合进行中」永远扣着
+    br.settleAgent();
+    if (!gw) return;
     const next = br.takeDeferred();
     if (!next) return;
     try {
