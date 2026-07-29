@@ -18,25 +18,7 @@ direct 模式做不到最后一种，根子在飞书：**同一个 appId 只能�
 
 ## 五分钟上手
 
-### 1. 起 broker
-
-```bash
-cd /root/workspace/master/pi-feishu
-node bin/broker.ts
-```
-
-看到这行就是好了：
-
-```
-[broker][info] broker 已就绪：/root/.pi/agent/feishu-broker.sock
-```
-
-它读的配置跟扩展侧是同一套（`~/.pi/agent/feishu.json` → `<项目>/.pi/feishu.json`），
-所以 appId / appSecret / 白名单这些不用重复配。
-
-配置有问题会当场以非零码退出并列出全部问题，不会带着半吊子状态跑起来。
-
-### 2. 让 pi 会话走 broker
+### 1. 让 pi 会话走 broker
 
 在要接飞书的那个项目里建 `<项目>/.pi/feishu.json`：
 
@@ -50,7 +32,7 @@ node bin/broker.ts
 > 只有当 broker 和 pi 会话跑在**不同的 agent 目录或不同用户**下时，才需要在两边都显式写
 > 同一个绝对路径，否则连不上。
 
-### 3. 配对
+### 2. 配对
 
 在该项目的 pi 会话里：
 
@@ -69,11 +51,39 @@ node bin/broker.ts
 把这串码发到你想绑的飞书对话（私聊或群都行），机器人回「配对成功」即完成。
 **在哪个对话里发，就绑哪个对话。**
 
-第二个、第三个会话重复第 2、3 步即可 —— 各拿各的码，绑各自的对话，共用同一个 bot。
+第二个、第三个会话重复这两步即可 —— 各拿各的码，绑各自的对话，共用同一个 bot。
+
+**broker 不用你手动起。** `autoStartBroker` 默认为 `true`：会话在 `/feishu start` 时先探活，
+连不上就自动拉起一个（detached，活得比拉它的会话久），等到就绪再继续。多个会话同时启动也没
+问题 —— broker 自己的 `listen()` 会探活，后到的那个发现 socket 已被占用就自己退出，会话侧
+接着连上先赢的那个即可。
+
+想自己管（比如交给 supervisor），把 `autoStartBroker` 设为 `false`，会话就不再插手；
+手动起用 `node bin/broker.ts` 或下面的管理脚本。
+
+## 管理脚本
+
+`scripts/brokerctl.js`（纯 JS、零依赖）用于手动运维：
+
+```bash
+node scripts/brokerctl.js status         # socket 探活 + pid 双信号
+node scripts/brokerctl.js start          # 后台拉起，等到 socket 可连才算成功
+node scripts/brokerctl.js stop           # SIGTERM 优雅停，超时才 SIGKILL
+node scripts/brokerctl.js restart
+node scripts/brokerctl.js logs -f        # 跟随日志
+```
+
+存活判定用**两个独立信号**：socket 探活（权威 —— 能连上才是真在服务）和 pid 文件
+（知道是哪个进程、能不能停）。两者不一致时会明确指出，比如「有 broker 在服务但没有
+pid 文件，不是本脚本起的，停不掉」——这种状态不说破的话最难排查。
+
+退出码：`0` 正常 / `1` 出错 / `3` 未在运行（便于脚本判断）。
 
 ## 用 supervisor 托管
 
-broker 自己不会重连也不会自愈，生产上交给进程管理器。
+broker 自己不会重连也不会自愈，生产上交给进程管理器。**这么做时记得把
+`autoStartBroker` 设为 `false`** —— 否则某个 pi 会话会绕过 supervisor 自己拉起一个，
+变成两套东西管同一个进程。
 
 `/etc/supervisor/conf.d/pi-feishu-broker.conf`：
 

@@ -116,6 +116,7 @@ const CFG: Config = {
   repoRoot: "/work/repo",
   transport: "direct",
   brokerSocket: "/work/repo/feishu-broker.sock",
+  autoStartBroker: true,
 };
 
 test("status：未运行时只说未运行，并给出启动方式", () => {

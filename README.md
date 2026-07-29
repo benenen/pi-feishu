@@ -82,6 +82,7 @@ pi install git:github.com/you/pi-feishu
 | `repoRoot` | 当前 cwd | 判定「写到范围外」的基准 |
 | `transport` | `"direct"` | `direct` 会话自己连飞书；`broker` 经本地 broker 进程共用一条长连接，多个会话可共用同一个飞书应用。详见下方「broker 模式」 |
 | `brokerSocket` | `<agentDir>/feishu-broker.sock` | 仅 `transport: "broker"` 用到。broker 进程监听的 Unix socket 路径。默认按 `getAgentDir()` 算出，**不是 cwd** —— broker 进程和各 pi 会话必须算出同一个路径才连得上，跨用户/跨 agent 目录部署时要显式填成同一个绝对路径 |
+| `autoStartBroker` | `true` | **仅 broker 档**：会话启动时若发现 broker 没在跑就自动拉起。交给 supervisor 托管时设为 `false` |
 
 ## 审批档位
 

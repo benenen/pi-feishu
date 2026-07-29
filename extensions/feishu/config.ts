@@ -42,6 +42,11 @@ export interface Config {
   transport: "direct" | "broker";
   /** broker 档下的 Unix socket 路径 */
   brokerSocket: string;
+  /**
+   * broker 档下，会话启动时若发现 broker 没在跑就自动拉起。
+   * 交给 supervisor 之类托管时关掉它 —— 否则谁都能拉起一个不受管理的进程。
+   */
+  autoStartBroker: boolean;
 }
 
 export class ConfigError extends Error {
@@ -142,6 +147,7 @@ export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Confi
   if (!appSecret) problems.push("缺少 appSecret（配置文件 appSecret 或环境变量 FEISHU_APP_SECRET）");
 
   const autoStart = readBoolean(merged.autoStart, "autoStart", false, problems);
+  const autoStartBroker = readBoolean(merged.autoStartBroker, "autoStartBroker", true, problems);
   const requireMention = readBoolean(merged.requireMention, "requireMention", true, problems);
 
   let dmMode: DmMode = "open";
@@ -275,5 +281,6 @@ export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Confi
     repoRoot,
     transport,
     brokerSocket,
+    autoStartBroker,
   };
 }

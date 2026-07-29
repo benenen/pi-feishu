@@ -5,7 +5,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { ConfigError, loadConfig, readConfigFile, type Config } from "./config.ts";
 import { createLogger } from "./log.ts";
 import { FeishuGateway } from "./feishu.ts";
+import net from "node:net";
+import { spawn } from "node:child_process";
 import { BrokerGateway } from "./broker-gateway.ts";
+import { ensureBroker } from "./broker/ensure.ts";
 import {
   announceAndBind,
   bindToChat,
@@ -86,6 +89,51 @@ export default function (pi: ExtensionAPI) {
     } catch (err) {
       notify(`${prefix}获取配对码失败：${String(err)}`);
     }
+  }
+
+  /**
+   * broker 档下，连接前先确保 broker 在跑。
+   *
+   * 探活用连 socket 而不是查 pid：pid 会被复用，「能连上」才是我们真正关心的。
+   * 拉起用 detached + unref —— broker 必须活得比拉起它的这个 pi 会话久，
+   * 否则会话一退它就跟着死，别的会话跟着失联。
+   */
+  async function ensureBrokerRunning(cfg: Config): Promise<boolean> {
+    const result = await ensureBroker(
+      {
+        probe: () =>
+          new Promise<boolean>((resolve) => {
+            const sock = net.createConnection(cfg.brokerSocket);
+            let settled = false;
+            const done = (ok: boolean) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              sock.destroy();
+              resolve(ok);
+            };
+            const timer = setTimeout(() => done(false), 500);
+            sock.once("connect", () => done(true));
+            sock.once("error", () => done(false));
+          }),
+        spawn: () => {
+          const entry = path.join(cfg.repoRoot, "bin", "broker.ts");
+          const child = spawn(process.execPath, [entry], {
+            cwd: cfg.repoRoot,
+            detached: true,
+            stdio: "ignore",
+          });
+          child.unref();
+          return { pid: child.pid };
+        },
+        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        now: () => Date.now(),
+        timeoutMs: 30_000,
+        pollMs: 250,
+      },
+      (msg) => log(msg),
+    );
+    return result !== "failed";
   }
 
   // gateway 只在 connect() 返回后才赋值，光靠它挡不住在途的第二次 start：
@@ -182,6 +230,15 @@ export default function (pi: ExtensionAPI) {
         }
       })();
     });
+
+    // 配了 broker 档就自动保证它在跑 —— 用户不该为了用飞书先去手动起个进程。
+    // 关掉 autoStartBroker 表示「由 supervisor 之类托管」，此时会话不去干预
+    if (gw instanceof BrokerGateway && cfg.autoStartBroker) {
+      if (!(await ensureBrokerRunning(cfg))) {
+        notify(`broker 未能就绪，无法启动飞书桥接。看日志：node scripts/brokerctl.js logs`);
+        return;
+      }
+    }
 
     try {
       if (gw instanceof BrokerGateway) await gw.connect(cfg.brokerSocket, path.basename(cwd), cwd);

@@ -355,3 +355,19 @@ test("brokerSocket 可以显式指定", () => {
   const c = loadConfig({ files: [{ ...base, brokerSocket: "/tmp/x.sock" }], env: {}, cwd: "/w" });
   assert.equal(c.brokerSocket, "/tmp/x.sock");
 });
+
+test("autoStartBroker 默认开 —— 配了 broker 就该自动保证它在跑", () => {
+  assert.equal(loadConfig({ files: [base], env: {}, cwd: "/w" }).autoStartBroker, true);
+});
+
+test("autoStartBroker 可关 —— 交给 supervisor 托管时不该由会话去拉", () => {
+  const c = loadConfig({ files: [{ ...base, autoStartBroker: false }], env: {}, cwd: "/w" });
+  assert.equal(c.autoStartBroker, false);
+});
+
+test("autoStartBroker 必须是布尔值", () => {
+  const e = throwsConfigError(() =>
+    loadConfig({ files: [{ ...base, autoStartBroker: "yes" }], env: {}, cwd: "/w" }),
+  );
+  assert.ok(e.problems.some((p) => p.includes("autoStartBroker")));
+});

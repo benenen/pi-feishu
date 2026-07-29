@@ -102,6 +102,7 @@ const CONFIG = {
   repoRoot: "/work/repo",
   transport: "direct" as const,
   brokerSocket: "/work/repo/feishu-broker.sock",
+  autoStartBroker: true,
 };
 
 test("流式收尾卡住时 endTurn 不会永久挂起，改为补发全文", async () => {
