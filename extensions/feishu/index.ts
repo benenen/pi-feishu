@@ -128,7 +128,11 @@ export default function (pi: ExtensionAPI) {
       void (async () => {
         try {
           // 待配对时，未绑定状态下只认配对码 —— 任何其他消息都不该绑上来，
-          // 否则「先握手再绑定」就形同虚设
+          // 否则「先握手再绑定」就形同虚设。
+          // broker 档下这个分支恒为假，是安全的死代码：broker 模式从不创建本地
+          // pairing（配对在 broker 侧靠 registry.matchCode + bound 帧完成），
+          // 且 broker 对未绑定会话的消息本就不会转发 message 帧过来（见
+          // broker/server.ts 的 deliver()），所以这里永远走不到。
           if (gw.boundChatId === undefined && pairing?.pending === true) {
             if (pairing.match(msg.text)) {
               gw.bind(msg.chatId);

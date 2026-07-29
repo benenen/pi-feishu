@@ -119,11 +119,26 @@ export class BrokerGateway implements GatewayLike {
     return f.base64 === undefined ? undefined : Buffer.from(f.base64, "base64");
   }
 
+  /**
+   * 已绑定会话的人类可读名称。查不到就返回 undefined —— 状态里退回只显示 id，
+   * 绝不能让一次状态查询因为这个可有可无的信息而失败。
+   *
+   * 与本类其余出站方法不同：这里**自我兜底**，与 FeishuGateway.describeBoundChat
+   * 的契约保持一致。其余方法（sendText/streamTurn/...）刻意不兜底、把异常交给
+   * bridge.ts 统一处理，是因为它们的失败是业务结果；这个方法的失败只是「这次
+   * 状态里少一个展示字段」，broker 连接已断（#socket 为空）时 #await 会立刻
+   * reject，若不在这里兜住，`/feishu status` 会因为这个可有可无的信息直接炸掉。
+   */
   async describeBoundChat(): Promise<string | undefined> {
-    const id = this.#nextId();
-    this.#post({ t: "describe_chat", id });
-    const f = (await this.#awaitId(id)) as { label?: string };
-    return f.label;
+    try {
+      const id = this.#nextId();
+      this.#post({ t: "describe_chat", id });
+      const f = (await this.#awaitId(id)) as { label?: string };
+      return f.label;
+    } catch (err) {
+      this.#log(`查询会话名称失败：${String(err)}`, "warning");
+      return undefined;
+    }
   }
 
   cardAsker: Asker = async (req, signal): Promise<Decision> => {

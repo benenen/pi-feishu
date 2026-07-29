@@ -171,6 +171,36 @@ test("连接断开时未决的请求一律 reject，不能永久挂住", async (
   await b.close();
 });
 
+test("broker 意外断线后 describeBoundChat 自我兜底，返回 undefined 而不是 reject", async () => {
+  // 与 sendText/streamTurn 等业务方法不同：describeBoundChat 返回的只是可有
+  // 可无的展示名称，状态查询不该因为它失败而整体报错，必须和 FeishuGateway
+  // 的 describeBoundChat 一样自我兜底
+  const p = tmpSock();
+  let serverSocket: net.Socket | undefined;
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    const reader = new FrameReader();
+    socket.on("data", (chunk: Buffer) => {
+      for (const f of reader.push(chunk) as ClientFrame[]) {
+        if (f.t === "hello") socket.write(encodeFrame({ t: "hello_ok" }));
+      }
+    });
+  });
+  await new Promise<void>((r) => server.listen(p, () => r()));
+
+  const gw = new BrokerGateway(() => {});
+  await gw.connect(p, "A", "/a");
+
+  // 模拟 broker 崩溃：服务端主动断开，客户端全程不调用 disconnect()
+  serverSocket?.destroy();
+  await new Promise((r) => setTimeout(r, 50));
+
+  assert.equal(await gw.describeBoundChat(), undefined);
+
+  await gw.disconnect();
+  await new Promise<void>((r) => server.close(() => r()));
+});
+
 test("意外断线（不调用 disconnect）之后，新发起的请求立刻 reject，不能永久挂住", async () => {
   const p = tmpSock();
   let serverSocket: net.Socket | undefined;
