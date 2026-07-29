@@ -85,6 +85,8 @@ pi install git:github.com/you/pi-feishu
 | `brokerSocket` | `<agentDir>/feishu-broker.sock` | 仅 `transport: "broker"` 用到。broker 进程监听的 Unix socket 路径。默认按 `getAgentDir()` 算出，**不是 cwd** —— broker 进程和各 pi 会话必须算出同一个路径才连得上，跨用户/跨 agent 目录部署时要显式填成同一个绝对路径 |
 | `autoStartBroker` | `true` | **仅 broker 档**：会话启动时若发现 broker 没在跑就自动拉起。交给 supervisor 托管时设为 `false` |
 
+> direct 模式的完整操作手册见 [`docs/direct.md`](docs/direct.md)：上手、命令、绑定方式、排障、冒烟清单。
+
 ## 审批档位
 
 | 档位 | bash 判定模型 | 适用 |
