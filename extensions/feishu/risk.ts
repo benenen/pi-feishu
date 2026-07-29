@@ -205,6 +205,82 @@ export function parseSegments(command: string): string[][] | undefined {
   return segments;
 }
 
+/** shell-quote 会把重定向报成 operator，其后紧跟的字符串就是目标 */
+const REDIRECT_OPS = new Set([">", ">>", "<", "<<", "<<<", ">&", "<&", "&>", "&>>"]);
+
+export interface ShellRedirect {
+  op: string;
+  target: string;
+}
+
+export interface ShellSegment {
+  /** 命令名 + 参数，**不含**重定向与其目标 */
+  argv: string[];
+  redirects: ShellRedirect[];
+  /** 本段与下一段之间的连接符（`|` / `&&` / `||` / `;`），末段为 undefined */
+  nextOp?: string;
+}
+
+/**
+ * 比 parseSegments 更细的一层：保留重定向目标与段间连接符。
+ *
+ * relaxed 档需要它才能问出结构性的问题 ——「这个 token 是命令名还是参数」
+ * 「这个路径是重定向目标还是位置参数」。在原始串上扫正则回答不了这些，
+ * 于是 `grep rm notes.txt` 会因为出现 `rm` 被拦、`2>/dev/null` 会被当成写 /dev。
+ *
+ * 返回 undefined 表示放弃判定（glob、变量展开、命令替换、未知操作符），
+ * 调用方应退回更保守的手段。
+ */
+export function parseShell(command: string): ShellSegment[] | undefined {
+  if (RAW_FORBIDDEN.test(command)) return undefined;
+
+  let entries: ReturnType<typeof parse>;
+  try {
+    entries = parse(command);
+  } catch {
+    return undefined;
+  }
+
+  const segments: ShellSegment[] = [];
+  let argv: string[] = [];
+  let redirects: ShellRedirect[] = [];
+
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i];
+    if (typeof entry === "string") {
+      argv.push(entry);
+      continue;
+    }
+    if (!(entry !== null && typeof entry === "object" && "op" in entry)) return undefined;
+    const op = String((entry as { op: unknown }).op);
+
+    if (SPLITTABLE_OPS.has(op)) {
+      segments.push({ argv, redirects, nextOp: op });
+      argv = [];
+      redirects = [];
+      continue;
+    }
+
+    if (REDIRECT_OPS.has(op)) {
+      // `cat a 2>/dev/null` 解析成 ["cat","a","2",{op:">"},"/dev/null"]——
+      // 那个 "2" 是文件描述符，不是位置参数，不摘掉会被当成命令的参数
+      if (argv.length > 0 && /^\d+$/.test(argv[argv.length - 1] as string)) argv.pop();
+      const target = entries[i + 1];
+      if (typeof target !== "string") return undefined;
+      redirects.push({ op, target });
+      i += 1;
+      continue;
+    }
+
+    // glob 与其余操作符（后台、子 shell）：看不到展开结果，放弃
+    return undefined;
+  }
+  segments.push({ argv, redirects });
+
+  if (segments.some((s) => s.argv.length === 0)) return undefined;
+  return segments;
+}
+
 /** 单段命令的 argv；命令含可拆分操作符时返回 undefined */
 export function parseCommand(command: string): string[] | undefined {
   const segments = parseSegments(command);
@@ -353,11 +429,102 @@ function compile(sources: readonly string[] | undefined): RegExp[] {
   return out;
 }
 
+/** 作为命令名出现即危险，无需再看参数 */
+const DANGEROUS_HEADS = new Set([
+  "rm", "rmdir", "shred", "truncate", "dd", "fdisk", "parted", "mount", "umount",
+  "chmod", "chown", "chgrp", "useradd", "userdel", "usermod", "passwd", "visudo",
+  "sudo", "su", "doas",
+  "shutdown", "reboot", "halt", "poweroff", "init",
+  "kill", "killall", "pkill",
+]);
+
+/**
+ * 有只读子命令的工具：整词拦会把排查类命令全误伤（`systemctl show-environment`
+ * 曾经就栽在这），所以判第一个参数。返回 true 表示这次调用是只读的。
+ */
+const READONLY_GUARDED = new Map<string, (rest: readonly string[]) => boolean>([
+  ["systemctl", (r) => {
+    const sub = r[0];
+    if (sub === undefined) return true; // 裸 systemctl 只列单元
+    return (
+      ["show-environment", "show", "status", "cat", "get-default"].includes(sub) ||
+      sub.startsWith("list-") ||
+      sub.startsWith("is-")
+    );
+  }],
+  // `service X status` 才是只读；`service --status-all` 没有第二个参数
+  ["service", (r) => r.length < 2 || r[1] === "status"],
+  ["iptables", (r) => ["-L", "-S", "--list", "--list-rules"].includes(r[0] ?? "")],
+  ["crontab", (r) => ["-l", "--list"].includes(r[0] ?? "")],
+  ["nft", (r) => r[0] === "list"],
+]);
+
+/** 命令 + 子命令才危险 */
+const DANGEROUS_PAIRS = new Map<string, ReadonlySet<string>>([
+  ["git", new Set(["push"])],
+  ["npm", new Set(["publish"])],
+  ["docker", new Set(["rm", "rmi", "prune"])],
+]);
+
+/** 下载后直接执行：这一段是 curl/wget 且被管到下一段 */
+const DOWNLOADERS = new Set(["curl", "wget"]);
+
+/** 写到这些顶层目录即危险 */
+const SYSTEM_DIRS = new Set(["etc", "usr", "bin", "sbin", "boot", "lib", "var", "root"]);
+
+/** /dev 下这几个是丢弃输出用的位桶，不是「写设备」 */
+const DEV_BIT_BUCKETS = new Set(["null", "zero", "stdout", "stderr", "tty"]);
+
+function riskyRedirectTarget(target: string): boolean {
+  if (!target.startsWith("/")) return false; // 相对路径由 write/edit 的仓库边界管
+  if (target.startsWith("/dev/")) {
+    const rest = target.slice(5);
+    return !(DEV_BIT_BUCKETS.has(rest) || rest.startsWith("fd/"));
+  }
+  return SYSTEM_DIRS.has(target.split("/")[1] ?? "");
+}
+
+/**
+ * 结构化判定：问的是「这个 token 是不是命令名」「这个路径是不是重定向目标」，
+ * 而不是「这坨文本里有没有出现 rm」。后者会把 `grep rm notes.txt` 判危险。
+ */
+function relaxedStructuralRisk(segments: readonly ShellSegment[]): Risk {
+  for (const seg of segments) {
+    // 按 basename 取命令名，`/bin/rm` 骗不过去
+    const head = path.basename(seg.argv[0] ?? "").toLowerCase();
+    const rest = seg.argv.slice(1);
+
+    if (DANGEROUS_HEADS.has(head) || head.startsWith("mkfs")) return "risky";
+
+    const readonlyCheck = READONLY_GUARDED.get(head);
+    if (readonlyCheck && !readonlyCheck(rest)) return "risky";
+
+    const pair = DANGEROUS_PAIRS.get(head);
+    if (pair && rest[0] !== undefined && pair.has(rest[0])) return "risky";
+    if (head === "docker" && rest[0] === "system" && rest[1] === "prune") return "risky";
+
+    if (DOWNLOADERS.has(head) && seg.nextOp === "|") return "risky";
+
+    if (seg.redirects.some((r) => riskyRedirectTarget(r.target))) return "risky";
+  }
+  return "safe";
+}
+
 export function assessRelaxedBashRisk(command: string, extra?: RelaxedPatterns): Risk {
   // allow 先判且优先级最高：它存在的意义就是给内置规则开口子
   if (compile(extra?.allow).some((re) => re.test(command))) return "safe";
-  const deny = [...RELAXED_DANGEROUS, ...compile(extra?.deny)];
-  return deny.some((re) => re.test(command)) ? "risky" : "safe";
+
+  const segments = parseShell(command);
+  const builtinRisk =
+    segments === undefined
+      ? // 解析放弃（glob / 变量展开 / 命令替换）—— 退回在原始串上扫正则。
+        // 精度差，但总比看不见强：`rm -rf $DIR` 仍然会被兜住
+        (RELAXED_DANGEROUS.some((re) => re.test(command)) ? "risky" : "safe")
+      : relaxedStructuralRisk(segments);
+  if (builtinRisk === "risky") return "risky";
+
+  // 用户自配的黑名单是正则契约，仍按原始串匹配
+  return compile(extra?.deny).some((re) => re.test(command)) ? "risky" : "safe";
 }
 
 export interface AssessArgs {

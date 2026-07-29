@@ -508,3 +508,44 @@ test("relaxed：不传自定义模式时行为与之前完全一致", () => {
   assert.equal(assessRelaxedBashRisk("npm run build"), "safe");
   assert.equal(assessRelaxedBashRisk("sudo x"), "risky");
 });
+
+// ── relaxed 改用结构判定（而非在原始串上扫正则）────────────────────
+
+test("relaxed：引号里、参数位上的危险词不再误判成命令", () => {
+  assert.equal(relaxed('echo "rm -rf /"'), "safe", "rm 在字符串里，不是命令");
+  assert.equal(relaxed("grep rm notes.txt"), "safe", "rm 是 grep 的 pattern");
+  assert.equal(relaxed("git log --grep=sudo"), "safe", "sudo 在 pattern 里");
+  assert.equal(relaxed("echo chmod"), "safe", "纯文本");
+  assert.equal(relaxed("cat notes.txt | grep dd"), "safe", "dd 是搜索词");
+});
+
+test("relaxed：真正作为命令名时照拦", () => {
+  assert.equal(relaxed("rm -rf /"), "risky");
+  assert.equal(relaxed("sudo systemctl restart nginx"), "risky");
+  assert.equal(relaxed("chmod 777 ."), "risky");
+  assert.equal(relaxed("echo hi | sudo tee /etc/x"), "risky", "管道后一段是 sudo");
+});
+
+test("relaxed：重定向按目标判，fd 前缀不影响", () => {
+  assert.equal(relaxed("cat a 2>/dev/null"), "safe");
+  assert.equal(relaxed("cmd 1>/dev/null 2>&1"), "safe");
+  assert.equal(relaxed("npm test > out.txt"), "safe", "相对路径");
+  assert.equal(relaxed("echo hi > /tmp/x"), "safe", "/tmp 不是系统目录");
+  assert.equal(relaxed("cat evil > /dev/sda"), "risky", "写块设备");
+  assert.equal(relaxed("echo x > /etc/cron.d/pwn"), "risky");
+  assert.equal(relaxed("echo x >> /root/.ssh/authorized_keys"), "risky");
+});
+
+test("relaxed：解析不了时退回原始串正则扫描，不放行", () => {
+  // glob 展开不可见 → 放弃结构判定 → 正则兜底
+  assert.equal(relaxed("rm -rf *"), "risky", "glob 让解析放弃，但 rm 仍要被兜住");
+  assert.equal(relaxed("ls *.ts"), "safe", "同样走兜底，但不命中黑名单");
+  // $ 变量展开同理
+  assert.equal(relaxed("rm -rf $DIR"), "risky");
+  assert.equal(relaxed("echo $HOME"), "safe");
+});
+
+test("relaxed：命令名按 basename 匹配，路径前缀骗不过去", () => {
+  assert.equal(relaxed("/bin/rm -rf /tmp/x"), "risky");
+  assert.equal(relaxed("/usr/bin/sudo ls"), "risky");
+});
