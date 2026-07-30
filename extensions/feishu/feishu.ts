@@ -3,7 +3,7 @@ import type { LarkChannel } from "@larksuiteoapi/node-sdk";
 import { createSdkLogger, type LogFn } from "./log.ts";
 import { chatLabel } from "./renderer.ts";
 import { isInvalidEmojiError } from "./reaction.ts";
-import type { AppendSink } from "./turn-stream.ts";
+import { cumulativeSink, type AppendSink } from "./turn-stream.ts";
 import type { Asker } from "./approval.ts";
 import type { Config } from "./config.ts";
 import type { GatewayLike } from "./bridge.ts";
@@ -138,7 +138,10 @@ export class FeishuGateway implements GatewayLike {
     const target = resolveTarget(this.#bound, to);
     // 未绑定时 target 为空是常态（终端自己在干活，没人从飞书说过话），静默跳过
     if (!channel || !target) return;
-    await channel.stream(target, { markdown: async (controller) => run(controller) });
+    // controller 必须包一层 cumulativeSink：直接喂增量会被 SDK 的重叠去重吞字
+    await channel.stream(target, {
+      markdown: async (controller) => run(cumulativeSink(controller)),
+    });
   }
 
   /** to 省略时发往已绑定会话；回绝陌生会话时必须显式传对方 chatId */

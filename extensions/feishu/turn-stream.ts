@@ -3,6 +3,35 @@ export interface AppendSink {
 }
 
 /**
+ * 把增量追加改写成「每次给累计全文」，专治飞书 SDK 流式 controller 的猜测式合并。
+ *
+ * SDK 的 `append()` 不知道生产者给的是增量还是累计，只能猜
+ * （`mergeStreamingText`，@larksuiteoapi/node-sdk 1.71.1 的 lib/index.js:96096）：
+ * 新块以已有内容开头就当累计，否则**取已有内容的尾巴与新块头部的最长重叠并去重**。
+ *
+ * 这个去重对真正的增量是有损的，而本扩展给的恰恰是增量（Bridge 逐段 push）：
+ *
+ * - `**lnny**` 被切成 `**ln` + `ny**` 时，尾巴的 `n` 与新块头部的 `n` 重叠，
+ *   第二个 n 被吞掉，飞书上显示成粗体的 `lny` —— 少一个字母，且**毫无报错**
+ * - 新块正好是已有内容的前缀时（`prev.startsWith(next)`）整块被丢掉
+ *
+ * 每次给累计全文就绕开了猜测：`next.startsWith(prev)` 恒成立，SDK 走精确分支
+ * 原样采纳。它内部仍按差量累加当前卡片的 content，卡片滚动（rollover）不受影响。
+ *
+ * 另一个好处：下游抛错时累计量不回退，下一次追加会把漏掉的那段一并带过去。
+ */
+export function cumulativeSink(sink: AppendSink): AppendSink {
+  let full = "";
+  return {
+    async append(chunk: string): Promise<void> {
+      if (chunk === "") return;
+      full += chunk;
+      await sink.append(full);
+    },
+  };
+}
+
+/**
  * pi 的事件是推过来的，飞书 channel.stream() 的 producer 是拉模型
  * （给你一个 controller，等你的 async 函数返回才算结束）。
  * TurnStream 是两者之间的带缓冲适配器。

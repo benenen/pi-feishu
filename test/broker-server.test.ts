@@ -192,6 +192,28 @@ test("配对成功会给该 chat 发一句确认文案，不能让用户输完�
   await server.close();
 });
 
+test("配对确认里的会话名要中和 markdown —— label 是目录名，什么字符都可能有", async () => {
+  const sent: Array<{ chatId: string; text: string }> = [];
+  const server = new BrokerServer({ channel: fakeChannel(sent), pairingTtlMs: 600_000, log: () => {} });
+  const p = tmpSock();
+  await server.listen(p);
+  const c = await connect(p);
+  c.send({ t: "hello", cwd: "/w/**pi**", label: "**pi**" });
+  await c.waitFor("hello_ok");
+  c.send({ t: "pair_request", id: "1" });
+  const code = (await c.waitFor("pair_code")) as { code: string };
+
+  server.deliver({ messageId: "om_x", chatId: "oc_1", senderId: "ou_1", text: code.code, imageKeys: [] });
+  await c.waitFor("bound");
+
+  const confirm = sent.find((s) => s.chatId === "oc_1");
+  assert.ok(confirm?.text.includes("pi"), "名字本身要留着");
+  assert.equal(confirm?.text.includes("**pi**"), false, "粗体标记要剥掉");
+
+  c.sock.destroy();
+  await server.close();
+});
+
 test("流式：begin/chunk/end 依次转成 channel 的 append", async () => {
   const sent: Array<{ chatId: string; text: string }> = [];
   const server = new BrokerServer({ channel: fakeChannel(sent), pairingTtlMs: 600_000, log: () => {} });

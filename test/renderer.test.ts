@@ -205,6 +205,18 @@ test("status：知道会话名称时，名称和 id 都要显示", () => {
   assert.match(out, /oc_bound/, "id 仍要留着，排查时要用");
 });
 
+test("status：会话名称里的 markdown 标记要中和掉，否则整段状态会被它撑变形", () => {
+  const out = renderStatus({
+    running: true,
+    config: CFG,
+    boundChatId: "oc_bound",
+    boundChatName: "**研发**`群`",
+  });
+  assert.match(out, /研发群/, "名字本身要留着");
+  assert.equal(out.includes("**研发**"), false, "粗体标记要剥掉");
+  assert.equal(out.includes("`群`"), false, "反引号要剥掉");
+});
+
 test("status：查不到名称时只显示 id，不显示空括号", () => {
   const out = renderStatus({ running: true, config: CFG, boundChatId: "oc_bound" });
   assert.match(out, /oc_bound/);

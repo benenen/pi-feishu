@@ -32,7 +32,7 @@ function codeSpan(text: string): string {
  * 中和会撑破粗体/代码片段的字符，用于直接插进 markup 的字段。
  * 不动下划线 —— `ask_question` 这类工具名里它很常见，剥掉反而是破坏。
  */
-function plain(text: string, max: number): string {
+export function plain(text: string, max: number): string {
   return flatten(text, max).replace(/[*`~]/g, "");
 }
 
@@ -160,9 +160,11 @@ export function renderStatus(info: StatusInfo): string {
     ? `broker · ${info.brokerConnected === false ? "**连接已断开**" : "已连接"} · ${c.brokerSocket}`
     : "direct（本会话自己连飞书）";
 
+  // 会话名是飞书那边的用户输入，直接插进这段 markup 的话，一个群名里的 `**`
+  // 就能把后面几行状态一起吃进粗体
   const named =
     info.boundChatName !== undefined && info.boundChatName !== ""
-      ? `${info.boundChatName} · ${info.boundChatId}`
+      ? `${plain(info.boundChatName, 40)} · ${info.boundChatId}`
       : `${info.boundChatId}`;
   // broker 档下本地没有 pairing 的概念，且「下一条消息会绑定它」是反的 ——
   // 未配对时下一条消息只会被 broker 回一句「请发送配对码」

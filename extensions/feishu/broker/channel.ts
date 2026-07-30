@@ -3,7 +3,7 @@ import type { LarkChannel } from "@larksuiteoapi/node-sdk";
 import { createSdkLogger, type LogFn } from "../log.ts";
 import { chatLabel } from "../renderer.ts";
 import { isInvalidEmojiError } from "../reaction.ts";
-import type { AppendSink } from "../turn-stream.ts";
+import { cumulativeSink, type AppendSink } from "../turn-stream.ts";
 import type { ApprovalRequest, Decision } from "../approval.ts";
 import type { Config } from "../config.ts";
 import {
@@ -109,7 +109,10 @@ export class BrokerChannel implements BrokerChannelLike {
   async streamTo(chatId: string, run: (sink: AppendSink) => Promise<void>): Promise<void> {
     const channel = this.#channel;
     if (!channel) return;
-    await channel.stream(chatId, { markdown: async (controller) => run(controller) });
+    // controller 必须包一层 cumulativeSink：直接喂增量会被 SDK 的重叠去重吞字
+    await channel.stream(chatId, {
+      markdown: async (controller) => run(cumulativeSink(controller)),
+    });
   }
 
   /** 表情 key 填错时飞书每次都报 231001，且 SDK 会打一坨 axios 转储 —— 认出来就别再试 */

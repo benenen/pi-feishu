@@ -4,6 +4,7 @@ import { randomInt, randomUUID } from "node:crypto";
 import { encodeFrame, FrameReader, type ClientFrame, type ServerFrame } from "./protocol.ts";
 import { SessionRegistry } from "./registry.ts";
 import { TurnStream, type AppendSink } from "../turn-stream.ts";
+import { plain } from "../renderer.ts";
 import type { ApprovalRequest, Decision } from "../approval.ts";
 import type { LogFn } from "../log.ts";
 import type { InboundMessage } from "../types.ts";
@@ -158,7 +159,8 @@ export class BrokerServer {
       // 单会话版 index.ts 在绑定成功时会给飞书发确认，broker 版沿用同样的体验：
       // 用户输完配对码得有反馈，不能指望会话自己记得回一句。
       void this.#safe(() =>
-        this.#channel.sendText(msg.chatId, `配对成功，本对话已绑定 pi 会话：${paired.label}`),
+        // label 是会话侧传来的目录名，直接插进 markdown 会被当标记解释
+        this.#channel.sendText(msg.chatId, `配对成功，本对话已绑定 pi 会话：${plain(paired.label, 60)}`),
       );
       return;
     }
