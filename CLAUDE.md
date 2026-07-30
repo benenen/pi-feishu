@@ -231,6 +231,15 @@ Node 的类型剥离不做代码生成，所以**不能用构造函数参数属�
 
 测试与注释用中文，与现有风格保持一致。
 
+涉及飞书 SDK 行为的，除了手写替身，再补一条**对着真 SDK 跑**的用例
+（`test/lark-stream-contract.test.ts`：createLarkChannel 之后把 rawClient 上那
+几个 HTTP 方法打掉，驱动 `channel.stream()`，断言真正 PATCH 出去的正文）。
+手抄的替身会随 SDK 升级悄悄失真 —— 流式吞字那次就是替身对了、真链路没验。
+
+**改完代码要重启 pi 才生效**：扩展在 pi 启动时 import 一次，`/feishu stop` +
+`start` 只是关开网关，模块还是旧的；broker 档还要单独重启 broker 进程。
+不重启就上飞书验，看到的是改之前的行为 —— 已经因此白排查过一轮。
+
 ## 配置
 
 `~/.pi/agent/feishu.json` → `<项目>/.pi/feishu.json`，后者覆盖前者。
