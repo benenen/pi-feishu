@@ -103,6 +103,7 @@ const CONFIG = {
   allowPatterns: [],
   approvalTimeoutMs: 1000,
   repoRoot: "/work/repo",
+  imageDirs: [],
   transport: "direct" as const,
   brokerSocket: "/work/repo/feishu-broker.sock",
   autoStartBroker: true,

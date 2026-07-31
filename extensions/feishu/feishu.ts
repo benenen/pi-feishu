@@ -153,6 +153,21 @@ export class FeishuGateway implements GatewayLike {
   }
 
   /**
+   * 发一张图片。收件方规则与 `sendText` 一致。
+   *
+   * 收的是字节而不是路径：SDK 的 `MediaUploader` 对字符串路径有自己的一套
+   * POSIX 黑名单 + `allowedFileDirs` 校验，但那套是它的默认值、跟本扩展的
+   * `imageDirs` 白名单不是一回事。路径准入统一由 `image.ts` 的 `gateImagePath`
+   * 判定，判完再读成 Buffer 递进来 —— 只留一处闸门，不搞两套各说各话的。
+   */
+  async sendImage(png: Buffer, to?: string): Promise<void> {
+    const channel = this.#channel;
+    const target = resolveTarget(this.#bound, to);
+    if (!channel || !target) return;
+    await channel.send(target, { image: { source: png } });
+  }
+
+  /**
    * 已绑定会话的人类可读名称。查不到就返回 undefined —— 状态里退回只显示 id，
    * 绝不能让一次状态查询因为这个可有可无的信息而失败。
    */

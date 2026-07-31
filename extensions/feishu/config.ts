@@ -49,6 +49,12 @@ export interface Config {
   allowPatterns: string[];
   approvalTimeoutMs: number;
   repoRoot: string;
+  /**
+   * 除仓库根外，还允许 `feishu_send_image` 往外发的目录（绝对路径）。
+   * **空数组表示只允许仓库内，不是「不限」** —— 与 groupAllowlist 的语义相反，
+   * 那边放宽的是谁能找机器人说话，这边放宽的是什么文件能离开这台机器。
+   */
+  imageDirs: string[];
   /** direct：会话自己连飞书（默认）；broker：经本地 broker 进程共用一条连接 */
   transport: "direct" | "broker";
   /** broker 档下的 Unix socket 路径 */
@@ -278,6 +284,11 @@ export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Confi
 
   const repoRoot = path.resolve(typeof merged.repoRoot === "string" ? merged.repoRoot : cwd);
 
+  // 相对路径按 cwd 展开：白名单要拿去跟绝对路径比对，留着相对量会比不上
+  const imageDirs = (readStringArray(merged.imageDirs, "imageDirs", problems) ?? []).map((d) =>
+    path.resolve(cwd, d),
+  );
+
   if (problems.length > 0) throw new ConfigError(problems);
 
   return {
@@ -299,6 +310,7 @@ export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Confi
     allowPatterns,
     approvalTimeoutMs,
     repoRoot,
+    imageDirs,
     transport,
     brokerSocket,
     autoStartBroker,

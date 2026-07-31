@@ -13,6 +13,14 @@ const WRITER_TOOLS = new Set(["write", "edit"]);
 const STRICT_SAFE_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
 /**
+ * 把本地文件送出这台机器的工具。**任何档位都要人点头**，包括 relaxed ——
+ * 另外两类（写文件、跑命令）坏在「改坏了本地」，这类坏在「发出去就收不回来」，
+ * 撤回按钮救不了已经被人看到的截图。目录白名单管的是「能发哪些文件」，
+ * 这道闸门管的是「这一次到底发不发」，两道都要。
+ */
+const EXFIL_TOOLS = new Set(["feishu_send_image"]);
+
+/**
  * shell-quote 不会把这几类东西报成 operator，必须在原始串上先拒掉 ——
  * 它们都会让 token 流与 shell 实际执行的 argv 脱节：
  *   反引号  —— `whoami` 原样变成一个普通字符串 token
@@ -588,6 +596,8 @@ export function assessRisk({
     // 而 strict 卖点正是「完全不信任的环境」。
     return STRICT_SAFE_TOOLS.has(toolName) ? "safe" : "risky";
   }
+
+  if (EXFIL_TOOLS.has(toolName)) return "risky";
 
   if (WRITER_TOOLS.has(toolName)) {
     const target = typeof input.path === "string" ? input.path : undefined;

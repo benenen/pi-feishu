@@ -6,7 +6,9 @@ import { ConfigError, loadConfig, readConfigFile, type Config } from "./config.t
 import { createLogger } from "./log.ts";
 import { FeishuGateway } from "./feishu.ts";
 import net from "node:net";
+import fs from "node:fs";
 import { spawn } from "node:child_process";
+import { gateImagePath, sniffImageType, MAX_IMAGE_BYTES } from "./image.ts";
 import { BrokerGateway } from "./broker/gateway.ts";
 import { ensureBroker } from "./broker/ensure.ts";
 import {
@@ -520,5 +522,84 @@ export default function (pi: ExtensionAPI) {
     // 把这次工具调用绑到触发它的那条消息，审批卡片才能弹回原始对话
     bridge.origins.bindToolCall(event.toolCallId, bridge.originMessageId);
     return await bridge.gateToolCall(event.toolName, event.input, tuiAsker, event.toolCallId);
+  });
+
+  // ── feishu_send_image ──────────────────────────────────────────────
+  //
+  // 参数用手写的 JSON Schema 而不是 typebox：typebox 只存在于 pi 自己的
+  // node_modules 里，从本仓库 import 运行期直接 ERR_MODULE_NOT_FOUND（实测过）。
+  // pi 把 parameters 原样透给模型、不做 TypeBox 校验，普通 JSON Schema 就够。
+  //
+  // 审批不在这里做：工具名已进 risk.ts 的 EXFIL_TOOLS，上面那个 tool_call
+  // 处理器会照常拦它。这里只管「哪些文件允许被送出去」。
+  const sendImageParams = {
+    type: "object",
+    properties: {
+      path: {
+        type: "string",
+        description:
+          "本地图片路径。必须落在仓库根目录内，或 feishu.json 的 imageDirs 白名单目录下；" +
+          "软链按真实目标判定。支持 png / jpeg / gif / bmp / webp，上限 10MB。",
+      },
+    },
+    required: ["path"],
+  };
+
+  pi.registerTool({
+    name: "feishu_send_image",
+    label: "发图到飞书",
+    description:
+      "把一张本地图片作为飞书图片消息发出去 —— 对方直接看到图，不是链接（内网链接对方打不开）。" +
+      "典型用途：把浏览器截图发给对方看。发往触发本回合的那个对话，未绑定时发往已绑定会话。",
+    promptSnippet: "feishu_send_image(path) — 把本地图片发进飞书对话",
+    parameters: sendImageParams as never,
+
+    async execute(toolCallId, params) {
+      const raw = (params as { path?: unknown }).path;
+      if (typeof raw !== "string" || raw.trim() === "") throw new Error("path 必须是非空字符串");
+
+      const cfg = config;
+      const gw = gateway;
+      if (!cfg || !gw) throw new Error("飞书桥接没在运行，先在终端执行 /feishu start");
+      if (!(gw instanceof FeishuGateway)) {
+        throw new Error("broker 档还没实现发图（协议要加一种帧），当前只有 direct 档支持");
+      }
+
+      // 目录判定按 realpath 走，否则白名单目录里放个软链就能把任意文件带出去。
+      // 文件不存在时 realpathSync 会抛，退回原串 —— 后面 readFile 会给出更准的错。
+      const gate = gateImagePath({
+        path: raw,
+        repoRoot: cfg.repoRoot,
+        imageDirs: cfg.imageDirs,
+        resolvePath: (p) => {
+          try {
+            return fs.realpathSync(p);
+          } catch {
+            return p;
+          }
+        },
+      });
+      if (!gate.ok) throw new Error(`拒绝发送：${gate.reason}`);
+
+      const buf = await fs.promises.readFile(gate.path);
+      if (buf.length > MAX_IMAGE_BYTES) {
+        throw new Error(`图片 ${buf.length} 字节，超过飞书 ${MAX_IMAGE_BYTES} 字节的上限`);
+      }
+      // 按魔数认，不看扩展名 —— 否则把任意文件改叫 .png 就绕过了目录白名单的意义
+      const kind = sniffImageType(buf);
+      if (kind === undefined) throw new Error(`${gate.path} 不是图片（按文件头判定），拒绝发送`);
+
+      // 与审批卡片同一套目标解析：优先本次工具调用所属的那条消息的来源对话
+      const to = bridge?.origins.chatOfToolCall(toolCallId) ?? bridge?.turnTarget;
+      if ((to ?? gw.boundChatId) === undefined) {
+        throw new Error("还没有绑定任何飞书对话，图片无处可发");
+      }
+      await gw.sendImage(buf, to);
+
+      return {
+        content: [{ type: "text" as const, text: `已发送 ${kind} 图片（${buf.length} 字节）到飞书` }],
+        details: undefined,
+      };
+    },
   });
 }

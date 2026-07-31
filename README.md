@@ -81,7 +81,8 @@ pi install git:github.com/you/pi-feishu
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `autoStart` | `false` | 会话启动时自动连接。**多开 pi 会抢消息** —— 同一个 appId 只有一条长连接，飞书把事件推给哪一条不确定，保持 `false` 更安全 |
-| `repoRoot` | 当前 cwd | 判定「写到范围外」的基准 |
+| `repoRoot` | 当前 cwd | 判定「写到范围外」的基准，也是 `feishu_send_image` 默认允许的发图范围 |
+| `imageDirs` | `[]` | 除仓库根外，还允许 `feishu_send_image` 发图的目录。相对路径按 cwd 展开。**空数组是「只允许仓库内」，不是「不限」** —— 与 `groupAllowlist` 相反，那边放宽的是谁能找机器人说话，这边放宽的是什么文件能离开这台机器 |
 | `transport` | `"direct"` | `direct` 会话自己连飞书；`broker` 经本地 broker 进程共用一条长连接，多个会话可共用同一个飞书应用。详见下方「broker 模式」 |
 | `brokerSocket` | `<agentDir>/feishu-broker.sock` | 仅 `transport: "broker"` 用到。broker 进程监听的 Unix socket 路径。默认按 `getAgentDir()` 算出，**不是 cwd** —— broker 进程和各 pi 会话必须算出同一个路径才连得上，跨用户/跨 agent 目录部署时要显式填成同一个绝对路径 |
 | `autoStartBroker` | `true` | **仅 broker 档**：会话启动时若发现 broker 没在跑就自动拉起。交给 supervisor 托管时设为 `false` |
@@ -320,6 +321,23 @@ broker 的路由表知道，会话侧没法单方面替它决定绑谁。`/feish
 首条通过白名单的消息会**绑定**该会话，之后其他对话的消息一律回绝（回执发到发起方那个会话，不是已绑定的那个）。
 
 飞书侧消息前缀 `!` 表示打断当前回合（steer），否则排队到回合结束（followUp）。
+
+### 发图片：`feishu_send_image`
+
+桥接启动后，agent 多一个工具 `feishu_send_image(path)`，把本地图片作为**图片消息**发进当前对话 ——
+对方直接看到图，不是链接（内网链接对方打不开，这正是它存在的理由）。典型用途是把浏览器截图发过去。
+
+三道闸门，缺一不可：
+
+1. **目录白名单** —— 只能发仓库根内、或 `imageDirs` 列出的目录下的文件，**软链按 realpath 判定**，
+   白名单目录里放个指向 `/etc` 的软链也带不出去
+2. **文件头识别** —— 按魔数认 png / jpeg / gif / bmp / webp，把 `/etc/shadow` 改名成 `.png` 不好使
+3. **人工审批** —— 工具名在 `risk.ts` 的 `EXFIL_TOOLS` 里，**任何审批档位都要人点头**，
+   包括 `relaxed`（`allowPatterns` 只对 bash 生效，放不开它）
+
+写文件、跑命令坏在「改坏了本地」，发图坏在「发出去就收不回来」—— 所以这条通道没有「默认放行」档。
+
+仅 `transport: "direct"` 支持；broker 档要给协议加一种图片帧，还没做。飞书单图上限 10MB。
 
 ## 开发
 

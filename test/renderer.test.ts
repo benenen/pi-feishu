@@ -117,6 +117,7 @@ const CFG: Config = {
   allowPatterns: [],
   approvalTimeoutMs: 120_000,
   repoRoot: "/work/repo",
+  imageDirs: [],
   transport: "direct",
   brokerSocket: "/work/repo/feishu-broker.sock",
   autoStartBroker: true,

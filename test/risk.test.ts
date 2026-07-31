@@ -284,6 +284,34 @@ test("参数形状不认识时保守判为危险", () => {
   assert.equal(bash("   "), "risky", "空命令");
 });
 
+test("feishu_send_image 在任何档位都要批 —— 它是往外送文件的通道", () => {
+  for (const mode of ["strict", "balanced", "relaxed"] as const) {
+    assert.equal(
+      assessRisk({
+        toolName: "feishu_send_image",
+        input: { path: "docs/shot.png" },
+        mode,
+        repoRoot: ROOT,
+      }),
+      "risky",
+      `${mode} 档没拦住外发`,
+    );
+  }
+});
+
+test("relaxed 的 allowPatterns 放不开 feishu_send_image —— 那组只对 bash 生效", () => {
+  assert.equal(
+    assessRisk({
+      toolName: "feishu_send_image",
+      input: { path: "docs/shot.png" },
+      mode: "relaxed",
+      repoRoot: ROOT,
+      allowPatterns: [".*"],
+    }),
+    "risky",
+  );
+});
+
 test("其他工具在 balanced 下放行", () => {
   assert.equal(
     assessRisk({ toolName: "read", input: { path: "/etc/passwd" }, mode: "balanced", repoRoot: ROOT }),

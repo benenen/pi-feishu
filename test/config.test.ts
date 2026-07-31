@@ -29,6 +29,26 @@ test("最小可用配置带出全部默认值", () => {
   assert.equal(c.approvalTimeoutMs, 120_000);
   assert.equal(c.repoRoot, path.resolve("/work/repo"));
   assert.deepEqual(c.groupAllowlist, []);
+  assert.deepEqual(c.imageDirs, [], "默认只允许发仓库内的图");
+});
+
+test("imageDirs 解析成绝对路径 —— 相对路径按 cwd 展开", () => {
+  const c = loadConfig({
+    files: [{ ...base, imageDirs: ["/var/shots", "tmp/shots"] }],
+    env: {},
+    cwd: "/work/repo",
+  });
+  assert.deepEqual(c.imageDirs, [path.resolve("/var/shots"), path.resolve("/work/repo/tmp/shots")]);
+});
+
+test("imageDirs 不是字符串数组时报错，而不是悄悄退回空数组", () => {
+  const err = throwsConfigError(() =>
+    loadConfig({ files: [{ ...base, imageDirs: "/var/shots" }], env: {}, cwd: "/work" }),
+  );
+  assert.ok(
+    err.problems.some((p) => p.includes("imageDirs")),
+    `问题列表里没提到 imageDirs：${err.problems.join(" / ")}`,
+  );
 });
 
 test("环境变量优先于配置文件", () => {

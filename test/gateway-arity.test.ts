@@ -27,3 +27,19 @@ test("sendText 的实现同样要接收收件方参数", () => {
   assert.ok(FeishuGateway.prototype.sendText.length >= 2);
   assert.ok(BrokerGateway.prototype.sendText.length >= 2);
 });
+
+/**
+ * sendImage 在 GatewayLike 里是可选的：broker 档还没实现（协议要加帧）。
+ * 但只要哪天实现了，它就必须跟 sendText 一样接住收件方 —— 断言写成
+ * 「没有就跳过，有就必须够参数」，补实现的人绕不过去。
+ */
+test("sendImage 的实现要接收收件方参数", () => {
+  assert.ok(
+    FeishuGateway.prototype.sendImage.length >= 2,
+    `FeishuGateway.sendImage 只声明了 ${FeishuGateway.prototype.sendImage.length} 个参数`,
+  );
+  const broker = BrokerGateway.prototype as { sendImage?: (...args: never[]) => unknown };
+  if (broker.sendImage !== undefined) {
+    assert.ok(broker.sendImage.length >= 2, "broker 档补 sendImage 时也要接住收件方");
+  }
+});

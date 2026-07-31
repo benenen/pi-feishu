@@ -45,6 +45,7 @@ pi 事件 (agent_start / message_update / tool_execution_*) ──►│
 | `deferred.ts` | 回合进行中来自其他对话的消息要扣住，等这轮跑完再单独成回合。见下方 |
 | `origin-registry.ts` | 消息级来源登记表：`messageId → chatId`，按原文认领回合来源，工具调用绑消息 |
 | `broker/` | broker 档。`gateway.ts` 是会话侧客户端，其余（`server`/`channel`/`registry`/`protocol`）跑在 broker 进程里 |
+| `image.ts` | 发图的准入判定：目录白名单（按 realpath）+ 魔数识别。纯函数，不碰文件系统 |
 | `risk.ts` | 安全判定。三档模型，详见下方 |
 | `approval.ts` | 多通道审批竞速（飞书卡片 vs 终端对话框），先到先得 |
 | `approval-card.ts` | 卡片构造/解析 + 未决审批登记表 |
@@ -169,6 +170,28 @@ handler 的 catch 吞掉，**消息就没了**。
   未捕获异常会变成 rejected promise 直接跳过 block 契约，结果是危险工具被放行）
 - 审批超时 / 所有通道都挂 / 没有通道 → 一律拒绝
 - 会话结束时所有未决审批一律拒绝，并把卡片收到终态
+
+### 外发通道没有「默认放行」档
+
+`feishu_send_image` 把本地文件送出这台机器，与写文件/跑命令不是一类风险：后两者坏在
+「改坏了本地」，它坏在「发出去就收不回来」。所以它在 `risk.ts` 里单列 `EXFIL_TOOLS`，
+**三个档位都判 risky**，`relaxed` 的 `allowPatterns` 也放不开它（那组只对 bash 生效）。
+
+再往这个方向加工具（发文件、发日志、贴代码到外部）时照此办理：进 `EXFIL_TOOLS`，
+别指望 `assessRisk` 末尾那句 `return "safe"`。
+
+路径准入只有 `image.ts` 的 `gateImagePath` 一处，判完读成 Buffer 再递给网关。
+**不要把路径直接交给 SDK** —— `MediaUploader` 有它自己的一套 `allowedFileDirs`
+黑白名单，与本扩展的 `imageDirs` 不是一回事，两套并存就是两套各说各话的闸门。
+
+### 扩展注册自定义工具时不能 import typebox
+
+pi 的 `registerTool` 声明 `parameters: TSchema`，官方示例写 `import { Type } from "typebox"`。
+但 typebox 只在 **pi 自己的 node_modules** 里，本仓库的扩展文件按自身路径向上解析，
+运行期直接 `ERR_MODULE_NOT_FOUND`（实测过）。
+
+pi 只是把 `parameters` 原样透给模型、不做 TypeBox 校验（core 里唯一一处 `Compile()`
+是给 models.json 用的），所以手写普通 JSON Schema 对象 + `as never` 即可。
 
 ### 卡片点击必须自己鉴权
 

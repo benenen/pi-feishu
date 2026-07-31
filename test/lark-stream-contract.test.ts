@@ -29,6 +29,8 @@ function offlineChannel() {
   });
 
   const patched: string[] = [];
+  const uploads: Array<{ image_type?: string; image?: unknown }> = [];
+  const messages: Array<{ msg_type?: string; content?: string }> = [];
   const raw = channel.rawClient as unknown as {
     cardkit: {
       v1: {
@@ -36,7 +38,7 @@ function offlineChannel() {
         cardElement: { content: unknown };
       };
     };
-    im: { v1: { message: { create: unknown } } };
+    im: { v1: { message: { create: unknown }; image: { create: unknown } } };
   };
   raw.cardkit.v1.card.create = async () => ({ data: { card_id: "card_1" } });
   raw.cardkit.v1.card.settings = async () => ({ code: 0 });
@@ -44,9 +46,17 @@ function offlineChannel() {
     patched.push(req.data?.content ?? "");
     return { code: 0 };
   };
-  raw.im.v1.message.create = async () => ({ data: { message_id: "om_1", chat_id: "oc_1" } });
+  raw.im.v1.message.create = async (req: { data?: { msg_type?: string; content?: string } }) => {
+    messages.push({ msg_type: req.data?.msg_type, content: req.data?.content });
+    return { data: { message_id: "om_1", chat_id: "oc_1" } };
+  };
+  // codegen 客户端会把外层信封剥掉，image_key 直接在顶层 —— 替身照这个形状回
+  raw.im.v1.image.create = async (req: { data?: { image_type?: string; image?: unknown } }) => {
+    uploads.push({ image_type: req.data?.image_type, image: req.data?.image });
+    return { image_key: "img_test_1" };
+  };
 
-  return { channel, patched };
+  return { channel, patched, uploads, messages };
 }
 
 test("真 SDK：包了 cumulativeSink 之后，切在重复字符中间也一字不差", async () => {
@@ -72,6 +82,18 @@ test("真 SDK：裸喂增量会丢字 —— 这就是 cumulativeSink 存在的�
   // 1.71.1 的 mergeStreamingText 把重叠的 n 去掉了。哪天 SDK 自己修好了这条会红，
   // 那时可以重新评估 cumulativeSink 还要不要留 —— 但别在没看过新实现前就删。
   assert.equal(patched.at(-1), "会话名 **lny** 跑完了");
+});
+
+test("真 SDK：发图片走 im/v1/images 上传 + msg_type=image，不是发链接", async () => {
+  const { channel, uploads, messages } = offlineChannel();
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  await channel.send("oc_1", { image: { source: png } });
+
+  assert.equal(uploads.length, 1, "应该先把图上传成 image_key");
+  assert.equal(uploads[0].image_type, "message");
+  assert.ok(Buffer.isBuffer(uploads[0].image), "上传的是图片字节本身");
+  assert.equal(messages.at(-1)?.msg_type, "image");
+  assert.deepEqual(JSON.parse(messages.at(-1)?.content ?? "{}"), { image_key: "img_test_1" });
 });
 
 test("真 SDK：多段增量按序拼回，不重不漏", async () => {
