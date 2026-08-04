@@ -9,6 +9,7 @@ import {
   handleCardAction,
   parseApprovalAction,
   resolveTarget,
+  resolveSendTarget,
 } from "../extensions/feishu/approval-card.ts";
 
 const REQ = { toolName: "bash", input: { command: "rm -rf /tmp/x" } };
@@ -539,4 +540,25 @@ test("审批卡片必须是共享卡片，否则点完没法收到终态", () =>
 test("收尾卡片同样标共享 —— 它是覆盖上去的那一张", () => {
   const card = buildSettledCard("已批准") as { config?: { update_multi?: boolean } };
   assert.equal(card.config?.update_multi, true);
+});
+
+// ── 话题：出站目标的归一化 ──────────────────────────────────────────
+
+test("resolveSendTarget：字符串收件方归一成只带 chatId 的目标", () => {
+  assert.deepEqual(resolveSendTarget("oc_bound", "oc_other"), { chatId: "oc_other" });
+  assert.deepEqual(resolveSendTarget("oc_bound", undefined), { chatId: "oc_bound" });
+});
+
+test("resolveSendTarget：话题目标原样带过去，replyTo 不能丢", () => {
+  const t = { chatId: "oc_1", replyTo: "om_ask", inThread: true };
+  assert.deepEqual(resolveSendTarget("oc_bound", t), t);
+});
+
+test("resolveSendTarget：都没有时不发送", () => {
+  assert.equal(resolveSendTarget(undefined, undefined), undefined);
+});
+
+test("resolveSendTarget：未绑定但有显式话题目标时照发", () => {
+  const t = { chatId: "oc_1", replyTo: "om_ask", inThread: true };
+  assert.deepEqual(resolveSendTarget(undefined, t), t);
 });

@@ -23,6 +23,19 @@ import {
 import { describeInbound, renderStatus, renderUnbindNotice } from "./renderer.ts";
 import { createPairing, type Pairing } from "./pairing.ts";
 import type { Asker } from "./approval.ts";
+import type { InboundMessage, SendTarget } from "./types.ts";
+
+/**
+ * 回执发回消息本来所在的地方：消息在话题里就回进那个话题，否则直接发进会话。
+ *
+ * 话题群里不这么做的话，回执会掉在群主干上 —— 提问的人在话题里等，
+ * 而答复出现在别处。普通群和私聊没有 threadId，退化成原来的行为。
+ */
+function replyTargetOf(msg: InboundMessage): SendTarget {
+  return msg.threadId === undefined
+    ? { chatId: msg.chatId }
+    : { chatId: msg.chatId, replyTo: msg.messageId, inThread: true };
+}
 
 /** 会话切换时等待断开的上限，防止飞书 API 挂住把 /new 一起冻住 */
 const SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -198,7 +211,7 @@ export default function (pi: ExtensionAPI) {
           if (gate === "pair-ok") {
             gw.bind(msg.chatId);
             log(`配对成功，已绑定 ${msg.chatId}`);
-            await gw.sendText("配对成功，本对话已绑定该 pi 会话。", msg.chatId);
+            await gw.sendText("配对成功，本对话已绑定该 pi 会话。", replyTargetOf(msg));
             return;
           }
           if (gate === "need-code") {
@@ -206,14 +219,14 @@ export default function (pi: ExtensionAPI) {
             await gw.sendText(
               "该 pi 会话尚未配对。请发送终端上显示的配对码；" +
                 "码已过期的话，在终端跑 /feishu pair 取一个新的。",
-              msg.chatId,
+              replyTargetOf(msg),
             );
             return;
           }
 
           if (!shouldAccept(gw, msg.chatId, cfg.multiChat)) {
             // 必须显式指定收件会话，否则会发到已绑定的那个会话去
-            await gw.sendText("该 pi 会话已绑定到其他对话。", msg.chatId);
+            await gw.sendText("该 pi 会话已绑定到其他对话。", replyTargetOf(msg));
             return;
           }
           log(describeInbound(msg));
@@ -255,9 +268,9 @@ export default function (pi: ExtensionAPI) {
           // 对话，这边只剩一个表情。理由详见 deferred.ts
           if (br.shouldDefer(msg.chatId)) {
             if (br.defer(msg.messageId, msg.chatId, text)) {
-              await gw.sendText("正在处理另一个对话的请求，稍后回复你。", msg.chatId);
+              await gw.sendText("正在处理另一个对话的请求，稍后回复你。", replyTargetOf(msg));
             } else {
-              await gw.sendText("排队的消息太多了，这条没接住，请稍后再发一次。", msg.chatId);
+              await gw.sendText("排队的消息太多了，这条没接住，请稍后再发一次。", replyTargetOf(msg));
             }
             return;
           }
@@ -590,8 +603,8 @@ export default function (pi: ExtensionAPI) {
       if (kind === undefined) throw new Error(`${gate.path} 不是图片（按文件头判定），拒绝发送`);
 
       // 与审批卡片同一套目标解析：优先本次工具调用所属的那条消息的来源对话
-      const to = bridge?.origins.chatOfToolCall(toolCallId) ?? bridge?.turnTarget;
-      if ((to ?? gw.boundChatId) === undefined) {
+      const to = bridge?.origins.targetOfToolCall(toolCallId) ?? bridge?.turnSendTarget;
+      if ((to?.chatId ?? gw.boundChatId) === undefined) {
         throw new Error("还没有绑定任何飞书对话，图片无处可发");
       }
       await gw.sendImage(buf, to);

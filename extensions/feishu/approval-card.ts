@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ApprovalRequest, Decision } from "./approval.ts";
 import type { LogFn } from "./log.ts";
+import type { SendTarget } from "./types.ts";
 
 export const APPROVAL_KIND = "pi-feishu-approval";
 
@@ -98,6 +99,21 @@ export function resolveTarget(
   explicit?: string,
 ): string | undefined {
   return explicit ?? bound;
+}
+
+/**
+ * 同 `resolveTarget`，但保留话题信息。
+ *
+ * 收件方可以是裸 chatId（终端发起的回合、回绝陌生会话等老调用点都是这种），
+ * 也可以是带 `replyTo` / `inThread` 的目标（话题里的消息触发的回合）。
+ * 归一成一种形状，网关那边就只有一条路径。
+ */
+export function resolveSendTarget(
+  bound: string | undefined,
+  explicit?: string | SendTarget,
+): SendTarget | undefined {
+  if (explicit === undefined) return bound === undefined ? undefined : { chatId: bound };
+  return typeof explicit === "string" ? { chatId: explicit } : explicit;
 }
 
 interface PendingEntry {

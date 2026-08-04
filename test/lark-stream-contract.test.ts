@@ -38,7 +38,15 @@ function offlineChannel() {
         cardElement: { content: unknown };
       };
     };
-    im: { v1: { message: { create: unknown }; image: { create: unknown } } };
+    im: { v1: { message: { create: unknown; reply: unknown }; image: { create: unknown } } };
+  };
+  const replies: Array<{ message_id?: string; reply_in_thread?: boolean }> = [];
+  raw.im.v1.message.reply = async (req: {
+    path?: { message_id?: string };
+    data?: { reply_in_thread?: boolean };
+  }) => {
+    replies.push({ message_id: req.path?.message_id, reply_in_thread: req.data?.reply_in_thread });
+    return { data: { message_id: "om_reply" } };
   };
   raw.cardkit.v1.card.create = async () => ({ data: { card_id: "card_1" } });
   raw.cardkit.v1.card.settings = async () => ({ code: 0 });
@@ -56,7 +64,7 @@ function offlineChannel() {
     return { image_key: "img_test_1" };
   };
 
-  return { channel, patched, uploads, messages };
+  return { channel, patched, uploads, messages, replies };
 }
 
 test("真 SDK：包了 cumulativeSink 之后，切在重复字符中间也一字不差", async () => {
@@ -94,6 +102,23 @@ test("真 SDK：发图片走 im/v1/images 上传 + msg_type=image，不是发链
   assert.ok(Buffer.isBuffer(uploads[0].image), "上传的是图片字节本身");
   assert.equal(messages.at(-1)?.msg_type, "image");
   assert.deepEqual(JSON.parse(messages.at(-1)?.content ?? "{}"), { image_key: "img_test_1" });
+});
+
+test("真 SDK：带 replyTo 时改走 im.v1.message.reply，并带上 reply_in_thread", async () => {
+  const { channel, replies, messages } = offlineChannel();
+  await channel.send("oc_1", { markdown: "在话题里回一句" }, { replyTo: "om_ask", replyInThread: true });
+
+  assert.equal(messages.length, 0, "有 replyTo 就不该走 message.create，否则会另起一个话题");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].message_id, "om_ask", "回复挂在触发这轮的那条消息上");
+  assert.equal(replies[0].reply_in_thread, true);
+});
+
+test("真 SDK：不带 replyTo 时仍走 message.create —— 普通群行为不变", async () => {
+  const { channel, replies, messages } = offlineChannel();
+  await channel.send("oc_1", { markdown: "普通群回一句" });
+  assert.equal(replies.length, 0);
+  assert.equal(messages.length, 1);
 });
 
 test("真 SDK：多段增量按序拼回，不重不漏", async () => {

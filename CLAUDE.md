@@ -171,6 +171,24 @@ handler 的 catch 吞掉，**消息就没了**。
 - 审批超时 / 所有通道都挂 / 没有通道 → 一律拒绝
 - 会话结束时所有未决审批一律拒绝，并把卡片收到终态
 
+### 话题只在「触发消息本来就在话题里」时才走
+
+出站目标是 `SendTarget`（`types.ts`）而不是裸 chatId。`replyTo` 有值时 SDK 改走
+`im.v1.message.reply` 并带 `reply_in_thread`，回复才落回提问的那个话题。
+
+判定的唯一依据是入站消息的 `threadId`（`origin-registry.ts` 的 `targetOf`）：
+有就回话题，没有就退化成 `{ chatId }` 走原来的 `message.create`。
+
+**不要改成「一律带 replyTo」** —— 普通群里那样会把每条回答都变成一个新话题，
+是所有现存用户可见的行为倒退。
+
+出站一律用 `bridge.turnSendTarget` / `origins.targetOfToolCall`，不要用
+`turnTarget` —— 后者只回 chatId，是给 `deferred.ts` 做「是不是同一个对话」比较用的，
+两个语义别混。
+
+broker 档在 `BrokerGateway` 那层把 `SendTarget` 压回 chatId（协议帧不带 replyTo）。
+收下这个参数只是为了两个网关同签名，补 broker 支持时要动 `protocol.ts`。
+
 ### 外发通道没有「默认放行」档
 
 `feishu_send_image` 把本地文件送出这台机器，与写文件/跑命令不是一类风险：后两者坏在

@@ -322,6 +322,22 @@ broker 的路由表知道，会话侧没法单方面替它决定绑谁。`/feish
 
 飞书侧消息前缀 `!` 表示打断当前回合（steer），否则排队到回合结束（followUp）。
 
+### 话题（thread）
+
+在**话题群**里 @ 机器人，回复会落回你提问的那个话题里 —— 正文流、补发的全文、审批卡片、
+`/feishu status` 之类的回执，全都跟着走。
+
+判定只看一件事：**触发这轮的那条消息有没有 `threadId`**。
+
+- 有 → 出站以「回复那条消息 + `reply_in_thread`」的方式发（走 `im.v1.message.reply`）
+- 没有 → 照旧直接发进会话（走 `im.v1.message.create`）
+
+所以普通群和私聊的行为**一个字节都没变**。这条判定不能改成「一律按话题发」——
+普通群里那样会把每条回答都变成一个新话题。
+
+仅 `transport: "direct"`。broker 档下话题信息会在协议帧那层丢掉（帧只带 chatId），
+回复仍会掉在群主干上；要支持得给 `send_text` / `stream_begin` 帧加 `replyTo`。
+
 ### 发图片：`feishu_send_image`
 
 桥接启动后，agent 多一个工具 `feishu_send_image(path)`，把本地图片作为**图片消息**发进当前对话 ——

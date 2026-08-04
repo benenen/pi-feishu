@@ -110,3 +110,30 @@ test("记下发送者和时间 —— 排查时要知道是谁什么时候说的
   assert.equal(origin?.senderId, "ou_张三");
   assert.equal(typeof origin?.ts, "number");
 });
+
+// ── 话题（thread）──────────────────────────────────────────────────
+
+test("话题里的消息：出站目标带 replyTo 和 inThread", () => {
+  const r = new MessageOriginRegistry();
+  r.record({ messageId: "om_1", chatId: "oc_1", senderId: "ou_1", threadId: "omt_9" });
+  assert.deepEqual(r.targetOf("om_1"), { chatId: "oc_1", replyTo: "om_1", inThread: true });
+});
+
+test("普通消息：出站目标只有 chatId，行为与加话题之前一致", () => {
+  const r = new MessageOriginRegistry();
+  r.record({ messageId: "om_1", chatId: "oc_1", senderId: "ou_1" });
+  assert.deepEqual(r.targetOf("om_1"), { chatId: "oc_1" });
+});
+
+test("查不到的消息没有出站目标", () => {
+  const r = new MessageOriginRegistry();
+  assert.equal(r.targetOf("om_nope"), undefined);
+  assert.equal(r.targetOf(undefined), undefined);
+});
+
+test("工具调用也能回查到话题目标 —— 审批卡片要弹在话题里", () => {
+  const r = new MessageOriginRegistry();
+  r.record({ messageId: "om_1", chatId: "oc_1", senderId: "ou_1", threadId: "omt_9" });
+  r.bindToolCall("call_1", "om_1");
+  assert.deepEqual(r.targetOfToolCall("call_1"), { chatId: "oc_1", replyTo: "om_1", inThread: true });
+});

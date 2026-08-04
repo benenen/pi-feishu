@@ -2,9 +2,14 @@ import net from "node:net";
 import { encodeFrame, FrameReader, type ClientFrame, type ServerFrame } from "./protocol.ts";
 import type { AppendSink } from "../turn-stream.ts";
 import type { GatewayLike } from "../bridge.ts";
-import type { InboundMessage } from "../types.ts";
+import type { InboundMessage, SendTarget } from "../types.ts";
 import type { Asker, Decision } from "../approval.ts";
 import type { LogFn } from "../log.ts";
+
+/** 收件方归一成 chatId。broker 协议还不带话题信息，只能取到这一层 */
+function chatIdOf(to?: string | SendTarget): string | undefined {
+  return typeof to === "string" || to === undefined ? to : to.chatId;
+}
 
 interface Pending {
   resolve: (f: ServerFrame) => void;
@@ -140,9 +145,15 @@ export class BrokerGateway implements GatewayLike {
     return f.code;
   }
 
-  async sendText(markdown: string, to?: string): Promise<void> {
+  /**
+   * 话题信息在这一档会被丢掉：协议帧只带 chatId，broker 那边没有 replyTo。
+   * 收下 SendTarget 只是为了与 direct 档同签名（否则联合类型的调用点编译不过），
+   * 补 broker 档话题支持时，要在 protocol.ts 的 send_text 帧上加 replyTo。
+   */
+  async sendText(markdown: string, to?: string | SendTarget): Promise<void> {
+    const chatId = chatIdOf(to);
     const id = this.#nextId();
-    this.#post({ t: "send_text", id, markdown, ...(to === undefined ? {} : { to }) });
+    this.#post({ t: "send_text", id, markdown, ...(chatId === undefined ? {} : { to: chatId }) });
     await this.#awaitId(id);
   }
 
@@ -151,7 +162,7 @@ export class BrokerGateway implements GatewayLike {
    * 但形参必须声明出来：少一个参数在 TS 里是合法赋值，漏掉不会报错，
    * 运行期却会让所有回合都发去同一个对话。
    */
-  async streamTurn(run: (sink: AppendSink) => Promise<void>, _to?: string): Promise<void> {
+  async streamTurn(run: (sink: AppendSink) => Promise<void>, _to?: string | SendTarget): Promise<void> {
     // 未绑定就安静地什么都不做，对齐 FeishuGateway.streamTurn 的
     // `if (!channel || !to) return`。
     //
@@ -215,7 +226,7 @@ export class BrokerGateway implements GatewayLike {
    * broker 档下收件方由 broker 的路由表决定（一个会话绑一个对话），
    * 所以这里用不上 to —— multiChat 是 direct 档的特性，两者不叠加。
    */
-  askerFor(_to?: string): Asker {
+  askerFor(_to?: string | SendTarget): Asker {
     return async (req, signal): Promise<Decision> => {
     const id = this.#nextId();
     if (signal.aborted) return { allow: false, reason: "已由其他通道处理" };

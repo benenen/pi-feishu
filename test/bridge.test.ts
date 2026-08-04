@@ -377,18 +377,18 @@ function targetTrackingGateway(sink: {
     bind() {},
     onMessage() {},
     async streamTurn(run, to) {
-      sink.streams.push(to);
+      sink.streams.push(typeof to === "string" || to === undefined ? to : to.chatId);
       await run({ async append() {} });
     },
     async sendText(text, to) {
-      sink.texts.push({ text, to });
+      sink.texts.push({ text, to: typeof to === "string" || to === undefined ? to : to.chatId });
     },
     async downloadImage() {
       return undefined;
     },
     askerFor(to) {
       return async () => {
-        sink.asks.push(to);
+        sink.asks.push(typeof to === "string" || to === undefined ? to : to.chatId);
         return { allow: false, reason: "未接线" };
       };
     },
@@ -764,4 +764,61 @@ test("没绑过的工具调用退回本回合的目标，不会漏到别处", as
   await bridge.gateToolCall("bash", { command: "rm -rf a" }, undefined, "tc_没绑过");
 
   assert.deepEqual(sink.asks, ["oc_群"]);
+});
+
+// ── 话题（thread）：回复要落回提问的那个话题 ────────────────────────
+
+/** 记录完整的出站目标，而不是压成 chatId —— 话题信息正是要验的那部分 */
+function fullTargetGateway(sink: { streams: unknown[]; asks: unknown[] }): GatewayLike {
+  return {
+    bind() {},
+    onMessage() {},
+    async streamTurn(run, to) {
+      sink.streams.push(to);
+      await run({ async append() {} });
+    },
+    async sendText() {},
+    async downloadImage() {
+      return undefined;
+    },
+    askerFor(to) {
+      return async () => {
+        sink.asks.push(to);
+        return { allow: false, reason: "未接线" };
+      };
+    },
+  };
+}
+
+test("话题里提问：回合的出站目标带 replyTo 和 inThread", () => {
+  const sink = { streams: [] as unknown[], asks: [] as unknown[] };
+  const bridge = new Bridge(MULTI, fullTargetGateway(sink), () => {}, () => 0, 1000);
+
+  bridge.recordInbound({ messageId: "om_t", chatId: "oc_g", senderId: "ou_1", threadId: "omt_9" });
+  bridge.noteInboundPrompt("om_t", "话题里问的");
+  bridge.claimTurnOrigin("话题里问的");
+  bridge.startTurn();
+
+  assert.deepEqual(sink.streams, [{ chatId: "oc_g", replyTo: "om_t", inThread: true }]);
+});
+
+test("普通群提问：出站目标只有 chatId，与加话题之前一致", () => {
+  const sink = { streams: [] as unknown[], asks: [] as unknown[] };
+  const bridge = new Bridge(MULTI, fullTargetGateway(sink), () => {}, () => 0, 1000);
+
+  claimFrom(bridge, "oc_g", "om_p", "普通群问的");
+  bridge.startTurn();
+
+  assert.deepEqual(sink.streams, [{ chatId: "oc_g" }]);
+});
+
+test("终端敲字发起的回合：退回已绑定会话，不带话题", () => {
+  const sink = { streams: [] as unknown[], asks: [] as unknown[] };
+  const gw = { ...fullTargetGateway(sink), boundChatId: "oc_bound" };
+  const bridge = new Bridge(MULTI, gw, () => {}, () => 0, 1000);
+
+  bridge.claimTurnOrigin("我在终端敲的");
+  bridge.startTurn();
+
+  assert.deepEqual(sink.streams, [{ chatId: "oc_bound" }]);
 });

@@ -13,6 +13,8 @@ export interface NormalizedLike {
   senderName?: string;
   content: string;
   resources: ReadonlyArray<{ type: string; fileKey: string }>;
+  /** 话题里的消息才有；SDK 的 NormalizedMessage 一直带着，之前被这层丢掉了 */
+  threadId?: string;
 }
 
 /**
@@ -30,6 +32,7 @@ export function toInbound(msg: NormalizedLike, chatName: string | undefined): In
     senderName: msg.senderName,
     text: msg.content,
     imageKeys: msg.resources.filter((r) => r.type === "image").map((r) => r.fileKey),
+    threadId: msg.threadId,
   };
 }
 

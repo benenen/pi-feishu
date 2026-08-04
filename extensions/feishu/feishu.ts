@@ -7,17 +7,30 @@ import { cumulativeSink, type AppendSink } from "./turn-stream.ts";
 import type { Asker } from "./approval.ts";
 import type { Config } from "./config.ts";
 import type { GatewayLike } from "./bridge.ts";
-import type { InboundMessage } from "./types.ts";
+import type { InboundMessage, SendTarget } from "./types.ts";
 import { ChatNameCache, toInbound } from "./inbound.ts";
 import {
   ApprovalRegistry,
   askViaCard,
   buildSettledCard,
   handleCardAction,
+  resolveSendTarget,
   resolveTarget,
 } from "./approval-card.ts";
 
 export type { InboundMessage } from "./types.ts";
+
+/**
+ * SendTarget → SDK 的 SendOptions。
+ *
+ * `replyTo` 有值时 SDK 改走 `im.v1.message.reply` 并带上 `reply_in_thread`，
+ * 回复才落在提问的那个话题里；没值就返回 undefined，SDK 走原来的
+ * `im.v1.message.create` —— 普通群和私聊的行为一个字节都不变。
+ */
+function threadOpts(target: SendTarget): { replyTo: string; replyInThread: boolean } | undefined {
+  if (target.replyTo === undefined) return undefined;
+  return { replyTo: target.replyTo, replyInThread: target.inThread === true };
+}
 
 export class FeishuGateway implements GatewayLike {
   #channel: LarkChannel | undefined;
@@ -133,23 +146,25 @@ export class FeishuGateway implements GatewayLike {
   }
 
   /** to 省略时发往已绑定会话；多会话模式下由 Bridge 传入本回合的来源 */
-  async streamTurn(run: (sink: AppendSink) => Promise<void>, to?: string): Promise<void> {
+  async streamTurn(run: (sink: AppendSink) => Promise<void>, to?: string | SendTarget): Promise<void> {
     const channel = this.#channel;
-    const target = resolveTarget(this.#bound, to);
+    const target = resolveSendTarget(this.#bound, to);
     // 未绑定时 target 为空是常态（终端自己在干活，没人从飞书说过话），静默跳过
     if (!channel || !target) return;
     // controller 必须包一层 cumulativeSink：直接喂增量会被 SDK 的重叠去重吞字
-    await channel.stream(target, {
-      markdown: async (controller) => run(cumulativeSink(controller)),
-    });
+    await channel.stream(
+      target.chatId,
+      { markdown: async (controller) => run(cumulativeSink(controller)) },
+      threadOpts(target),
+    );
   }
 
   /** to 省略时发往已绑定会话；回绝陌生会话时必须显式传对方 chatId */
-  async sendText(markdown: string, to?: string): Promise<void> {
+  async sendText(markdown: string, to?: string | SendTarget): Promise<void> {
     const channel = this.#channel;
-    const target = resolveTarget(this.#bound, to);
+    const target = resolveSendTarget(this.#bound, to);
     if (!channel || !target) return;
-    await channel.send(target, { markdown });
+    await channel.send(target.chatId, { markdown }, threadOpts(target));
   }
 
   /**
@@ -160,11 +175,11 @@ export class FeishuGateway implements GatewayLike {
    * `imageDirs` 白名单不是一回事。路径准入统一由 `image.ts` 的 `gateImagePath`
    * 判定，判完再读成 Buffer 递进来 —— 只留一处闸门，不搞两套各说各话的。
    */
-  async sendImage(png: Buffer, to?: string): Promise<void> {
+  async sendImage(png: Buffer, to?: string | SendTarget): Promise<void> {
     const channel = this.#channel;
-    const target = resolveTarget(this.#bound, to);
+    const target = resolveSendTarget(this.#bound, to);
     if (!channel || !target) return;
-    await channel.send(target, { image: { source: png } });
+    await channel.send(target.chatId, { image: { source: png } }, threadOpts(target));
   }
 
   /**
@@ -240,17 +255,19 @@ export class FeishuGateway implements GatewayLike {
    * 面向指定会话的审批通道。卡片的发送/登记/竞速收尾与 broker 档共用。
    * to 省略时发往已绑定会话；多会话模式下由 Bridge 传入本回合的来源。
    */
-  askerFor(to?: string): Asker {
+  askerFor(to?: string | SendTarget): Asker {
     return async (req, signal) => {
       const channel = this.#channel;
-      const target = resolveTarget(this.#bound, to);
+      const target = resolveSendTarget(this.#bound, to);
       if (!channel || !target) throw new Error("飞书未连接或未绑定会话");
       return askViaCard({
         registry: this.#approvals,
-        chatId: target,
+        chatId: target.chatId,
         req,
         signal,
-        send: async (chatId, card) => (await channel.send(chatId, { card })).messageId,
+        // 卡片跟着回合走进同一个话题，否则问题在话题里、审批卡片却掉在群主干上
+        send: async (chatId, card) =>
+          (await channel.send(chatId, { card }, threadOpts(target))).messageId,
         settleCard: (messageId, status) => this.#settleCard(messageId, status),
       });
     };

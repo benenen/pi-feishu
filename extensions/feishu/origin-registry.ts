@@ -1,7 +1,11 @@
+import type { SendTarget } from "./types.ts";
+
 export interface MessageOrigin {
   messageId: string;
   chatId: string;
   senderId: string;
+  /** 话题里的消息才有。出站按它决定要不要回进话题 */
+  threadId?: string;
   /** 登记时刻，排查时用 */
   ts: number;
 }
@@ -65,13 +69,14 @@ export class MessageOriginRegistry {
    * 算出来之后再调 `indexPrompt` 补上。
    */
   record(
-    msg: { messageId: string; chatId: string; senderId: string },
+    msg: { messageId: string; chatId: string; senderId: string; threadId?: string },
     promptText?: string,
   ): void {
     this.#byMessage.set(msg.messageId, {
       messageId: msg.messageId,
       chatId: msg.chatId,
       senderId: msg.senderId,
+      threadId: msg.threadId,
       ts: this.#now(),
     });
     if (promptText !== undefined) this.indexPrompt(msg.messageId, promptText);
@@ -114,6 +119,22 @@ export class MessageOriginRegistry {
     return this.#byMessage.get(messageId)?.chatId;
   }
 
+  /**
+   * 出站目标：发去哪个会话，以及要不要回进话题。
+   *
+   * 触发这轮的消息在话题里，就以「回复它 + reply_in_thread」的方式发，答案才落
+   * 在提问的那个话题下。不在话题里就只给 chatId，走原来的直发路径 ——
+   * 普通群里如果也按话题发，每条回答都会变成一个新话题。
+   */
+  targetOf(messageId: string | undefined): SendTarget | undefined {
+    if (messageId === undefined) return undefined;
+    const origin = this.#byMessage.get(messageId);
+    if (origin === undefined) return undefined;
+    return origin.threadId === undefined
+      ? { chatId: origin.chatId }
+      : { chatId: origin.chatId, replyTo: messageId, inThread: true };
+  }
+
   /** 把工具调用绑到触发它的消息，让审批卡片能弹回原始对话 */
   bindToolCall(toolCallId: string, messageId: string | undefined): void {
     if (messageId === undefined) return;
@@ -122,6 +143,11 @@ export class MessageOriginRegistry {
 
   chatOfToolCall(toolCallId: string): string | undefined {
     return this.chatOf(this.#byToolCall.get(toolCallId));
+  }
+
+  /** 同 targetOf，按工具调用回查 —— 审批卡片要弹在触发它的那个话题里 */
+  targetOfToolCall(toolCallId: string): SendTarget | undefined {
+    return this.targetOf(this.#byToolCall.get(toolCallId));
   }
 
   /** 清掉一条记录及挂在它上面的工具调用绑定 */

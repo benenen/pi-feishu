@@ -103,3 +103,12 @@ test("同一对话的并发查询共用一次调用，且按到达顺序返回",
   assert.equal(calls, 1, "同一个对话的两条消息各查了一次");
   assert.deepEqual(order, [1, 2], "后到的消息先拿到结果，会把两句话的顺序颠倒");
 });
+
+test("话题消息带上 threadId —— 没有它就没法把回复发回同一个话题", () => {
+  const msg = toInbound(sdkMsg({ threadId: "omt_9" }), "话题群");
+  assert.equal(msg.threadId, "omt_9");
+});
+
+test("普通群/私聊没有 threadId，字段留空而不是编一个", () => {
+  assert.equal(toInbound(sdkMsg(), "后端组").threadId, undefined);
+});

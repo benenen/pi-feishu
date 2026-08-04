@@ -17,6 +17,7 @@ import { DeferredQueue, shouldDefer, type DeferredMessage } from "./deferred.ts"
 import { MessageOriginRegistry } from "./origin-registry.ts";
 export { gateInbound, type GateState, type InboundGate } from "./gate.ts";
 import type { InboundMessage } from "./feishu.ts";
+import type { SendTarget } from "./types.ts";
 import type { LogFn } from "./log.ts";
 
 export interface GatewayLike {
@@ -24,13 +25,13 @@ export interface GatewayLike {
   bind(chatId: string): void;
   onMessage(handler: (msg: InboundMessage) => void): void;
   /** to 省略时发往网关的默认收件方 */
-  streamTurn(run: (sink: AppendSink) => Promise<void>, to?: string): Promise<void>;
-  sendText(markdown: string, to?: string): Promise<void>;
+  streamTurn(run: (sink: AppendSink) => Promise<void>, to?: string | SendTarget): Promise<void>;
+  sendText(markdown: string, to?: string | SendTarget): Promise<void>;
   /**
    * 发图片。可选：broker 档还没实现（协议要加一种帧），direct 档才有。
    * 收字节不收路径 —— 路径准入是 `image.ts` 的事，见 FeishuGateway.sendImage。
    */
-  sendImage?(png: Buffer, to?: string): Promise<void>;
+  sendImage?(png: Buffer, to?: string | SendTarget): Promise<void>;
   downloadImage(fileKey: string): Promise<Buffer | undefined>;
   /**
    * 给消息加表情回应，充当「已读/在处理」的信号。
@@ -41,7 +42,7 @@ export interface GatewayLike {
    * 面向指定会话的审批通道。多会话模式下，卡片必须弹回触发该回合的那个对话 ——
    * 弹错地方就是让不相干的人看见并批准。
    */
-  askerFor(to?: string): Asker;
+  askerFor(to?: string | SendTarget): Asker;
 }
 
 /**
@@ -303,7 +304,7 @@ export class Bridge {
   }
 
   /** 入站消息一到就登记来源，在任何放行判定之前 */
-  recordInbound(msg: { messageId: string; chatId: string; senderId: string }): void {
+  recordInbound(msg: { messageId: string; chatId: string; senderId: string; threadId?: string }): void {
     this.#origins.record(msg);
   }
 
@@ -341,6 +342,23 @@ export class Bridge {
     if (!this.#agentActive) return undefined;
     if (!this.#config.multiChat) return this.#gateway.boundChatId;
     return this.#origins.chatOf(this.#originMessageId) ?? this.#gateway.boundChatId;
+  }
+
+  /**
+   * 同 `turnTarget`，但带上话题信息 —— **出站一律用这个**。
+   *
+   * `turnTarget` 只回 chatId，`deferred.ts` 拿它做「是不是同一个对话」的比较，
+   * 那个语义不能变，所以另开一个而不是改它的返回类型。
+   *
+   * 触发这轮的消息不在话题里（普通群 / 私聊 / 终端敲的字）时，这里退化成
+   * `{ chatId }`，与加话题之前完全一致。
+   */
+  get turnSendTarget(): SendTarget | undefined {
+    const chatId = this.turnTarget;
+    if (chatId === undefined) return undefined;
+    if (!this.#config.multiChat) return { chatId };
+    const target = this.#origins.targetOf(this.#originMessageId);
+    return target?.chatId === chatId ? target : { chatId };
   }
 
   /**
@@ -386,8 +404,8 @@ export class Bridge {
     if (this.#turn) return;
     this.#turnApproved = false;
     // 出站目标不再是回合开始时快照下来的字符串，而是每次按认领到的
-    // messageId 回查 —— 见 turnTarget
-    const target = this.turnTarget;
+    // messageId 回查 —— 见 turnTarget / turnSendTarget
+    const target = this.turnSendTarget;
     const stream = new TurnStream();
     const turn: TurnState = {
       stream,
@@ -504,7 +522,7 @@ export class Bridge {
 
     // 审批卡片要弹回**触发这次调用**的那个对话。工具调用绑过消息就按它回查，
     // 否则退回本回合的目标 —— 弹错地方等于让不相干的人看见并批准
-    const askTarget = this.#origins.chatOfToolCall(toolCallId ?? "") ?? this.turnTarget;
+    const askTarget = this.#origins.targetOfToolCall(toolCallId ?? "") ?? this.turnSendTarget;
     const askers: Asker[] = [this.#gateway.askerFor(askTarget)];
     if (tuiAsker) askers.push(tuiAsker);
 
