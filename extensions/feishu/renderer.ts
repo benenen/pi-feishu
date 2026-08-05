@@ -45,6 +45,11 @@ export function renderUserPrompt(
   return `> 💻 终端：${flatten(text, 200)}\n\n`;
 }
 
+/** 每张飞书回合卡片先标出触发它的问题，旧卡片被更新时也能看出在答哪一条。 */
+export function renderQuestion(text: string): string {
+  return `> 💬 问题：${plain(text, 200)}\n\n`;
+}
+
 export function renderToolStart(toolName: string, input: Record<string, unknown>): string {
   let detail = "";
   if (toolName === "bash" && typeof input.command === "string") {

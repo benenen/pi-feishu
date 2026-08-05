@@ -6,6 +6,7 @@ import {
   formatTokens,
   renderBlocked,
   renderNotice,
+  renderQuestion,
   renderToolEnd,
   renderToolStart,
   renderTurnEnd,
@@ -30,6 +31,10 @@ test("formatTokens 分档", () => {
 test("终端发起的 prompt 会标注来源，飞书发起的不回显", () => {
   assert.equal(renderUserPrompt("跑一下测试", "interactive"), "> 💻 终端：跑一下测试\n\n");
   assert.equal(renderUserPrompt("跑一下测试", "feishu"), null);
+});
+
+test("飞书回合卡片带上对应问题原文", () => {
+  assert.equal(renderQuestion("看下总共有多少个员工"), "> 💬 问题：看下总共有多少个员工\n\n");
 });
 
 test("超长 prompt 被截断且压平换行", () => {

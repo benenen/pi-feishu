@@ -79,7 +79,7 @@ pi 的 TUI 不接管 stderr，`console.error` 会直接打进渲染区（光标�
 `bridge.ts` 侧统一兜底 —— 任何 gateway 调用的 rejection 都不能逃进 pi 的事件循环。
 新增 gateway 调用点时，照着现有四处的写法包好。
 
-### pi 把排队消息并进同一个 agent 运行，所以跨对话的消息必须自己扣住
+### pi 把排队消息并进同一个 agent 运行，所以普通消息必须自己扣住
 
 `pi-agent-core` 的 `agent-loop.js`：agent 本该结束时发现有 followUp，就把它塞进
 `pendingMessages` 然后 **`continue` 外层循环** —— 不发 `agent_end`，也不再发一次
@@ -89,8 +89,22 @@ pi 的 TUI 不接管 stderr，`console.error` 会直接打进渲染区（光标�
 所以**回合进行中来自别的对话的消息，答案会整段发进上一个对话** —— 那边只看到一个
 表情，一个字都收不到。这不是竞态，是必然。
 
+同一个对话也不能直接 followUp：目的地虽然没错，答案却只更新先前那张卡片；飞书更新
+消息不会把旧卡片置底，后来那条问题下面没有机器人消息，看起来就是「pi 做完了但没回」。
+一条普通消息必须单独开一个 run 和一张卡，卡片头再带上对应的飞书问题原文。
+
 对策：`shouldDefer` 判定为真时不投给 pi，扣在 `DeferredQueue` 里，等 `agent_settled`
-再作为新 prompt 发出去，自然开出新的 `agent_start`。
+再作为新 prompt 发出去，自然开出新的 `agent_start`。只有**当前回合所在的同一会话、
+同一话题**用 `!` 显式 steer 时立即打断；另一个会话或同群不同话题的 `!` 仍要扣住，
+不能劫持当前任务。
+
+`ExtensionAPI.sendUserMessage()` 返回 `void`，不是可等待的 Promise；从调用到
+`agent_start` 之间还有异步窗口。接线层必须先用 `reserveDispatch(messageId)` 同步占位，
+再调用 `sendUserMessage`，否则两条紧邻消息都可能看见「空闲」并挤进同一个 run。同步拒绝
+时用 `cancelDispatch` 释放占位和来源；不要用 `await sendUserMessage` 制造已经等待成功的假象。
+Pi 的 wrapper 还会吞掉底层 Promise 的异步 preflight rejection，因此生产接线在投递后挂
+120 秒 `DispatchWatchdog`：到 `before_agent_start` / `agent_start` 就清掉；一直没启动则 abort、
+释放 reservation、给原问题失败回执，并继续放行延迟队列，绝不能让整座桥永久卡在 busy。
 
 ### 回合来源只能靠 before_agent_start 的 prompt 认领
 
@@ -99,9 +113,12 @@ pi 不提供「这个回合是哪条消息触发的」：`agent_start` 是空事
 收到的原字符串（`expandPromptTemplates: false`，pi 不改写），且恰好在 `agent_start`
 之前发出。
 
-所以入站时把 `messageId → { chatId, senderId }` 和「发给 pi 的原文」一起登记进
+所以入站时把 `messageId → { chatId, senderId, question }` 和「发给 pi 的原文」一起登记进
 `origin-registry.ts`，`before_agent_start` 上按原文认领，出站一律按 messageId 回查。
 **不要再引入任何「最近一条是谁」的全局变量** —— 两条消息接连进来时它必错。
+
+`question` 是飞书原始正文，给 `startTurn` 放在新卡片顶部；不能改用加工后的 prompt，
+后者可能已经拼进图片 key、字节数等只给 agent 看的说明。纯图片正文为空时才退回 prompt。
 
 认领关联在 `agent_settled` 清，**不能在 `agent_end` 清**：自动重试会在一次运行里
 开多个回合，而 `before_agent_start` 只发一次。

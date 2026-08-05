@@ -4,6 +4,8 @@ export interface MessageOrigin {
   messageId: string;
   chatId: string;
   senderId: string;
+  /** 卡片头展示飞书原始问题；agent prompt 可能已拼进图片说明等加工内容 */
+  question?: string;
   /** 话题里的消息才有。出站按它决定要不要回进话题 */
   threadId?: string;
   /** 登记时刻，排查时用 */
@@ -17,7 +19,7 @@ export interface MessageOrigin {
 export const MAX_ORIGINS = 200;
 
 /**
- * 入站消息的来源登记表：`messageId → { chatId, senderId, ts }`。
+ * 入站消息的来源登记表：`messageId → { chatId, senderId, question, ts }`。
  *
  * ## 为什么需要「按原文认领」这一步
  *
@@ -38,10 +40,10 @@ export const MAX_ORIGINS = 200;
  *
  * ## 已知边界
  *
- * `before_agent_start` 只对**触发回合**的消息发。排队进来的（steer/followUp）
- * 并入正在跑的那个运行，不会再发一次，因此认领不到 —— 但那也没有第二个目的地
- * 可发，它们本来就该走当前回合的流。跨对话的消息由 `deferred.ts` 扣住、
- * 单独成回合，所以不会走到这个缺口上。
+ * `before_agent_start` 只对**触发回合**的消息发。当前对话显式 `!` steer 时会并入
+ * 正在跑的那个运行，不会再发一次，因此认领不到 —— 它本来就该沿用当前流。
+ * 其余忙时消息不直接交给 pi，统一由 `deferred.ts` 扣住并单独成回合，所以都会有
+ * 自己的认领、目的地和问题标题。
  */
 export class MessageOriginRegistry {
   /** 插入序即淘汰序 —— Map 的迭代顺序就是插入顺序 */
@@ -65,20 +67,22 @@ export class MessageOriginRegistry {
    * 入站消息一到就登记，在任何放行判定之前 —— 被挡掉的消息也要有来源，
    * 否则回绝的话发不回去。
    *
-   * 原文是可选的：入站那一刻还没算出发给 pi 的 prompt（要下图片、要剥 `!` 前缀），
-   * 算出来之后再调 `indexPrompt` 补上。
+   * 第二个参数是发给 pi 的 prompt，入站那一刻还没算出来（要下图片、要剥 `!` 前缀），
+   * 所以可稍后再调 `indexPrompt` 补上；`msg.text` 则是卡片标题用的飞书原文。
    */
   record(
-    msg: { messageId: string; chatId: string; senderId: string; threadId?: string },
+    msg: { messageId: string; chatId: string; senderId: string; text?: string; threadId?: string },
     promptText?: string,
   ): void {
-    this.#byMessage.set(msg.messageId, {
+    const origin: MessageOrigin = {
       messageId: msg.messageId,
       chatId: msg.chatId,
       senderId: msg.senderId,
       threadId: msg.threadId,
       ts: this.#now(),
-    });
+      ...(msg.text === undefined ? {} : { question: msg.text }),
+    };
+    this.#byMessage.set(msg.messageId, origin);
     if (promptText !== undefined) this.indexPrompt(msg.messageId, promptText);
 
     while (this.#byMessage.size > MAX_ORIGINS) {
@@ -117,6 +121,24 @@ export class MessageOriginRegistry {
   chatOf(messageId: string | undefined): string | undefined {
     if (messageId === undefined) return undefined;
     return this.#byMessage.get(messageId)?.chatId;
+  }
+
+  /** 判定 steer 是否仍在同一条对话流：群里的不同话题不能只靠 chatId 合并。 */
+  conversationOf(
+    messageId: string | undefined,
+  ): { chatId: string; threadId?: string } | undefined {
+    if (messageId === undefined) return undefined;
+    const origin = this.#byMessage.get(messageId);
+    if (origin === undefined) return undefined;
+    return origin.threadId === undefined
+      ? { chatId: origin.chatId }
+      : { chatId: origin.chatId, threadId: origin.threadId };
+  }
+
+  /** 卡片标题只展示用户在飞书里发的原文，不回显加工后的 agent prompt。 */
+  questionOf(messageId: string | undefined): string | undefined {
+    if (messageId === undefined) return undefined;
+    return this.#byMessage.get(messageId)?.question;
   }
 
   /**

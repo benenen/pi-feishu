@@ -24,6 +24,7 @@ import { describeInbound, renderStatus, renderUnbindNotice } from "./renderer.ts
 import { createPairing, type Pairing } from "./pairing.ts";
 import type { Asker } from "./approval.ts";
 import type { InboundMessage, SendTarget } from "./types.ts";
+import { DispatchWatchdog } from "./dispatch-watchdog.ts";
 
 /**
  * 回执发回消息本来所在的地方：消息在话题里就回进那个话题，否则直接发进会话。
@@ -39,6 +40,8 @@ function replyTargetOf(msg: InboundMessage): SendTarget {
 
 /** 会话切换时等待断开的上限，防止飞书 API 挂住把 /new 一起冻住 */
 const SHUTDOWN_TIMEOUT_MS = 5_000;
+/** void sendUserMessage 没有失败回调；两分钟还没到 before_agent_start 就止损，不能永久占住桥 */
+const DISPATCH_START_TIMEOUT_MS = 120_000;
 
 function resolveConfig(cwd: string): Config {
   return loadConfig({
@@ -79,6 +82,63 @@ export default function (pi: ExtensionAPI) {
   let ctxRef: ExtensionContext | undefined;
   const log = createLogger(() => ctxRef);
   let pairing: Pairing | undefined;
+  const dispatchWatchdog = new DispatchWatchdog(DISPATCH_START_TIMEOUT_MS);
+
+  /**
+   * ExtensionAPI 把真实 Promise rejection 收进 runtime error，扩展拿不到；watchdog 是
+   * 未选模型、鉴权失败等 preflight 在 agent_start 前失败时唯一可用的止损。
+   */
+  function armDispatchTimer(
+    br: Bridge,
+    gw: FeishuGateway | BrokerGateway,
+    messageId: string,
+    target: SendTarget | string,
+  ): void {
+    dispatchWatchdog.arm(messageId, () => {
+      if (bridge !== br || gateway !== gw || !br.expireDispatch(messageId)) return;
+      // 尽量中止仍挂在 preflight/compaction 的迟到任务；即使 abort 自己失败，
+      // reservation 也已经释放，不能让整座桥永久只进队列不出队。
+      try {
+        ctxRef?.abort();
+      } catch (err) {
+        log(`投递超时后中止 pi 失败：${String(err)}`, "warning");
+      }
+      log(`消息在 ${DISPATCH_START_TIMEOUT_MS}ms 内未进入 agent_start，已释放投递占位`, "error");
+      // 先调用 release：async 函数会在首个 await 前同步拿走并 reserve 下一条。
+      // 失败回执是外部网络 IO，不能让它挂住旧队列，也不能给新入站留下抢跑窗口。
+      void releaseOneDeferred(br, gw).catch((err: unknown) =>
+        log(`投递超时后继续放行队列失败：${String(err)}`, "error"),
+      );
+      void gw.sendText("这条消息未能启动处理，请再发一次。", target).catch(() => {});
+    });
+  }
+
+  /** settled 或 watchdog 之后只放一条；它的 settled 会继续驱动下一条。 */
+  async function releaseOneDeferred(
+    br: Bridge,
+    gw: FeishuGateway | BrokerGateway,
+  ): Promise<void> {
+    if (br.isAgentActive) return;
+    const next = br.takeDeferred();
+    if (!next) return;
+    const target = br.origins.targetOf(next.messageId) ?? next.chatId;
+    const dispatched = br.dispatchToAgent(next.messageId, next.text, undefined, () => {
+      pi.sendUserMessage(next.text);
+    });
+    if (dispatched.kind === "busy") {
+      // 从 isAgentActive 到 dispatchToAgent 没有 await，正常不可达；保守回队尾。
+      br.defer(next.messageId, next.chatId, next.text);
+      return;
+    }
+    if (dispatched.kind === "sent") {
+      armDispatchTimer(br, gw, next.messageId, target);
+      return;
+    }
+    log(`扣住的消息重新发起失败：${String(dispatched.error)}`, "error");
+    // 同步失败没有 agent_settled 帮忙驱动；失败回执也不能阻塞后续队列。
+    void gw.sendText("刚才那条消息没能处理，请再发一次。", target).catch(() => {});
+    await releaseOneDeferred(br, gw);
+  }
 
   /** 签发配对码并只在终端显示 —— 发进飞书就等于把门钥匙挂门上了 */
   function issuePairingCode(notify: (msg: string) => void): void {
@@ -263,22 +323,37 @@ export default function (pi: ExtensionAPI) {
           // 影响消息处理，react 内部已自兜异常
           void gw.react?.(msg.messageId, cfg.readReceiptEmoji);
 
-          // 回合进行中、且这条来自别的对话 → 扣住，等这轮跑完再单独成回合。
-          // 直接排队的话 pi 会把它并进同一个 agent 运行，答案整段发进上一个
-          // 对话，这边只剩一个表情。理由详见 deferred.ts
-          if (br.shouldDefer(msg.chatId)) {
+          // 回合进行中的普通新消息一律扣住，等这轮跑完再单独成回合：跨对话时
+          // 防止答案发错地方；同一对话时保证一问一卡，别只更新上方的旧卡片。
+          // 当前对话用 ! 显式 steer 是唯一例外。理由详见 deferred.ts
+          if (br.shouldDefer(msg.messageId, deliverAs)) {
             if (br.defer(msg.messageId, msg.chatId, text)) {
-              await gw.sendText("正在处理另一个对话的请求，稍后回复你。", replyTargetOf(msg));
+              await gw.sendText("当前请求还在处理中，这条已排队，完成后会另开卡片回复。", replyTargetOf(msg));
             } else {
               await gw.sendText("排队的消息太多了，这条没接住，请稍后再发一次。", replyTargetOf(msg));
             }
             return;
           }
 
-          // 登记发给 pi 的原文。before_agent_start 会带着同一个字符串回来，
-          // 那时按它认领，就知道这个回合归哪条消息、该发回哪个对话
-          br.noteInboundPrompt(msg.messageId, text);
-          await pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
+          // sendUserMessage 是 fire-and-forget 的 void API；Bridge 把占位、来源登记、
+          // 调用和同步失败回滚收在同一个无 await 的同步段里。
+          const dispatched = br.dispatchToAgent(msg.messageId, text, deliverAs, () => {
+            pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
+          });
+          if (dispatched.kind === "busy") {
+            if (br.defer(msg.messageId, msg.chatId, text)) {
+              await gw.sendText("当前请求还在处理中，这条已排队，完成后会另开卡片回复。", replyTargetOf(msg));
+            } else {
+              await gw.sendText("排队的消息太多了，这条没接住，请稍后再发一次。", replyTargetOf(msg));
+            }
+            return;
+          }
+          if (dispatched.kind === "failed") {
+            log(`消息未能交给 pi：${String(dispatched.error)}`, "error");
+            await gw.sendText("这条消息没能交给 pi 处理，请再发一次。", replyTargetOf(msg)).catch(() => {});
+          } else if (dispatched.kind === "sent" && deliverAs !== "steer") {
+            armDispatchTimer(br, gw, msg.messageId, replyTargetOf(msg));
+          }
         } catch (err) {
           log(`处理入站消息失败：${String(err)}`, "error");
         }
@@ -358,6 +433,7 @@ export default function (pi: ExtensionAPI) {
     const br = bridge;
     gateway = undefined;
     bridge = undefined;
+    dispatchWatchdog.clearAll();
     if (!gw) {
       notify("飞书桥接未在运行");
       return;
@@ -456,10 +532,12 @@ export default function (pi: ExtensionAPI) {
   // 终端敲的字也会走到这儿，认领不到任何消息，于是来源置空、出站退回已绑定会话 ——
   // 这正好替掉了原先手动清 #lastOrigin 的那一步。
   pi.on("before_agent_start", (event) => {
-    bridge?.claimTurnOrigin(event.prompt);
+    dispatchWatchdog.clear(bridge?.claimTurnOrigin(event.prompt));
   });
 
-  pi.on("agent_start", () => bridge?.startTurn());
+  pi.on("agent_start", () => {
+    dispatchWatchdog.clear(bridge?.startTurn());
+  });
 
   pi.on("message_update", (event) => {
     const e = event.assistantMessageEvent;
@@ -492,7 +570,7 @@ export default function (pi: ExtensionAPI) {
   // 并回同一个运行，等于没修。
   //
   // 一次只放一条：它自己会开一个新回合，下一条等那个回合 settled 再放，
-  // 天然就是先来后到。
+  // 已经进入 DeferredQueue 的消息按 FIFO 放行。
   pi.on("agent_settled", async () => {
     const br = bridge;
     const gw = gateway;
@@ -501,17 +579,7 @@ export default function (pi: ExtensionAPI) {
     // 都会被当成「回合进行中」永远扣着
     br.settleAgent();
     if (!gw) return;
-    const next = br.takeDeferred();
-    if (!next) return;
-    try {
-      // 扣住时走的是提前 return，原文还没登记过 —— 现在补上，
-      // 否则 before_agent_start 认领不到，这条的答案会发回上一个对话
-      br.noteInboundPrompt(next.messageId, next.text);
-      await pi.sendUserMessage(next.text);
-    } catch (err) {
-      log(`扣住的消息重新发起失败：${String(err)}`, "error");
-      await gw.sendText("刚才那条消息没能处理，请再发一次。", next.chatId).catch(() => {});
-    }
+    await releaseOneDeferred(br, gw);
   });
 
   pi.on("tool_call", async (event, ctx) => {

@@ -3,21 +3,86 @@ import assert from "node:assert/strict";
 import { DeferredQueue, shouldDefer, MAX_DEFERRED } from "../extensions/feishu/deferred.ts";
 
 test("空闲时一律不扣 —— 没有回合在跑，直接发就是了", () => {
-  assert.equal(shouldDefer({ streaming: false, turnTarget: "oc_dm", chatId: "oc_group" }), false);
+  assert.equal(shouldDefer({
+    streaming: false,
+    turnTarget: { chatId: "oc_dm" },
+    incomingTarget: { chatId: "oc_group" },
+  }), false);
 });
 
-test("回合进行中、来自同一个对话 → 不扣", () => {
-  // 它会作为 followUp 并进当前回合，而当前回合的流就发往这个对话，本来就是对的
-  assert.equal(shouldDefer({ streaming: true, turnTarget: "oc_dm", chatId: "oc_dm" }), false);
+test("回合进行中、来自同一个对话 → 也扣住，下一条回复要另开卡片", () => {
+  // followUp 会并进当前 agent run，只更新先前那张卡片；后来这条消息下面不会出现
+  // 新回复，看起来就像机器人没回。扣住后单独成回合，才能得到一问一卡。
+  assert.equal(shouldDefer({
+    streaming: true,
+    turnTarget: { chatId: "oc_dm" },
+    incomingTarget: { chatId: "oc_dm" },
+  }), true);
 });
 
 test("回合进行中、来自另一个对话 → 扣住", () => {
   // 这是「私聊在跑，群里 @ 一句」：不扣的话答案整段进私聊，群里一个字都收不到
-  assert.equal(shouldDefer({ streaming: true, turnTarget: "oc_dm", chatId: "oc_group" }), true);
+  assert.equal(shouldDefer({
+    streaming: true,
+    turnTarget: { chatId: "oc_dm" },
+    incomingTarget: { chatId: "oc_group" },
+  }), true);
+});
+
+test("显式 ! 打断仍然立即 steer，不为一问一卡改成排队", () => {
+  assert.equal(
+    shouldDefer({
+      streaming: true,
+      turnTarget: { chatId: "oc_dm" },
+      incomingTarget: { chatId: "oc_dm" },
+      deliverAs: "steer",
+    }),
+    false,
+  );
+});
+
+test("另一个对话的 ! 不能劫持当前回合，仍然扣住", () => {
+  assert.equal(
+    shouldDefer({
+      streaming: true,
+      turnTarget: { chatId: "oc_dm" },
+      incomingTarget: { chatId: "oc_group" },
+      deliverAs: "steer",
+    }),
+    true,
+  );
+});
+
+test("同一群不同话题的 ! 不能劫持当前回合", () => {
+  assert.equal(
+    shouldDefer({
+      streaming: true,
+      turnTarget: { chatId: "oc_group", threadId: "omt_A" },
+      incomingTarget: { chatId: "oc_group", threadId: "omt_B" },
+      deliverAs: "steer",
+    }),
+    true,
+  );
+});
+
+test("同一群同一话题的 ! 仍可立即 steer", () => {
+  assert.equal(
+    shouldDefer({
+      streaming: true,
+      turnTarget: { chatId: "oc_group", threadId: "omt_A" },
+      incomingTarget: { chatId: "oc_group", threadId: "omt_A" },
+      deliverAs: "steer",
+    }),
+    false,
+  );
 });
 
 test("回合没有明确目标时不扣 —— 没有要保护的对话", () => {
-  assert.equal(shouldDefer({ streaming: true, turnTarget: undefined, chatId: "oc_group" }), false);
+  assert.equal(shouldDefer({
+    streaming: true,
+    turnTarget: undefined,
+    incomingTarget: { chatId: "oc_group" },
+  }), false);
 });
 
 test("队列按先来后到出队", () => {

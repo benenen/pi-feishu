@@ -7,6 +7,7 @@ import { requestApproval, type Asker, type Decision } from "./approval.ts";
 import {
   renderBlocked,
   renderNotice,
+  renderQuestion,
   renderToolEnd,
   renderToolStart,
   renderTurnEnd,
@@ -222,6 +223,18 @@ export class Bridge {
    * 而 `before_agent_start` 只发一次。
    */
   #originMessageId: string | undefined;
+  /** 纯图片消息的飞书原文为空时，退回实际投给 agent 的 prompt 作为卡片标题 */
+  #originPrompt: string | undefined;
+
+  /**
+   * `pi.sendUserMessage()` 是 fire-and-forget 的 void API。从调用它到
+   * `before_agent_start` / `agent_start` 之间有异步窗口，不能在这段时间继续
+   * 宣称空闲，否则紧邻的第二问会被 pi 并进同一 run、只更新第一张卡片。
+   */
+  #dispatchReserved = false;
+  #dispatchMessageId: string | undefined;
+  /** before_agent_start 已经认领后，超时器不能再把一条即将 start 的合法投递清掉 */
+  #dispatchAccepted = false;
 
   #deferred = new DeferredQueue();
   #toolStartedAt = new Map<string, number>();
@@ -245,7 +258,7 @@ export class Bridge {
   #agentActive = false;
 
   get isAgentActive(): boolean {
-    return this.#agentActive;
+    return this.#agentActive || this.#dispatchReserved;
   }
 
   /** 飞书流是否开着：`agent_start` → `agent_end`。只管渲染，别拿它判断 pi 忙不忙 */
@@ -304,12 +317,19 @@ export class Bridge {
   }
 
   /** 入站消息一到就登记来源，在任何放行判定之前 */
-  recordInbound(msg: { messageId: string; chatId: string; senderId: string; threadId?: string }): void {
+  recordInbound(
+    msg: { messageId: string; chatId: string; senderId: string; text?: string; threadId?: string },
+  ): void {
     this.#origins.record(msg);
   }
 
-  /** 登记这条消息最终发给 pi 的原文，供 before_agent_start 按原文认领 */
-  noteInboundPrompt(messageId: string, promptText: string): void {
+  /** 登记会开新 run 的 prompt；并入当前 run 的 steer 没有 before_agent_start，不能留索引 */
+  noteInboundPrompt(
+    messageId: string,
+    promptText: string,
+    deliverAs?: "steer" | "followUp",
+  ): void {
+    if (deliverAs === "steer") return;
     this.#origins.indexPrompt(messageId, promptText);
   }
 
@@ -323,8 +343,70 @@ export class Bridge {
    * 认不到就置空 —— 终端敲的字走的也是这条路，此时必须是「没有来源」，
    * 沿用上一次的会把终端的回合发进飞书上一个对话。
    */
-  claimTurnOrigin(prompt: string): void {
-    this.#originMessageId = this.#origins.claimByPrompt(prompt)?.messageId;
+  claimTurnOrigin(prompt: string): string | undefined {
+    const origin = this.#origins.claimByPrompt(prompt);
+    this.#originMessageId = origin?.messageId;
+    this.#originPrompt = origin === undefined ? undefined : prompt;
+    if (origin?.messageId === this.#dispatchMessageId) this.#dispatchAccepted = true;
+    return origin?.messageId;
+  }
+
+  /**
+   * 在调用 fire-and-forget 的 sendUserMessage **之前**同步占位。
+   * 返回 false 表示另一条消息已经抢先占住，调用方必须把当前消息转入延迟队列。
+   */
+  reserveDispatch(messageId: string): boolean {
+    if (this.isAgentActive) return false;
+    this.#dispatchReserved = true;
+    this.#dispatchMessageId = messageId;
+    this.#dispatchAccepted = false;
+    return true;
+  }
+
+  /** sendUserMessage 同步拒绝（例如扩展上下文已失效）时撤销占位和认领索引。 */
+  cancelDispatch(messageId: string): void {
+    if (!this.#dispatchReserved || this.#dispatchMessageId !== messageId) return;
+    this.#dispatchReserved = false;
+    this.#dispatchMessageId = undefined;
+    this.#dispatchAccepted = false;
+    this.#origins.forget(messageId);
+  }
+
+  /**
+   * fire-and-forget 投递迟迟没有走到 before_agent_start 时的止损。
+   * 已被 before_agent_start 认领就返回 false，避免合法的慢启动被定时器误清。
+   */
+  expireDispatch(messageId: string): boolean {
+    if (
+      !this.#dispatchReserved ||
+      this.#dispatchMessageId !== messageId ||
+      this.#dispatchAccepted
+    ) return false;
+    this.cancelDispatch(messageId);
+    return true;
+  }
+
+  /**
+   * 把「占位 → 登记认领原文 → 调 void API → 同步失败回滚」收在一个不可拆的同步段。
+   * 接线层若分别调用这些步骤，很容易在中间加进 await，把竞态窗口重新打开。
+   */
+  dispatchToAgent(
+    messageId: string,
+    promptText: string,
+    deliverAs: "steer" | "followUp" | undefined,
+    send: () => void,
+  ): { kind: "sent" } | { kind: "busy" } | { kind: "failed"; error: unknown } {
+    const startsRun = deliverAs !== "steer";
+    if (startsRun && !this.reserveDispatch(messageId)) return { kind: "busy" };
+    this.noteInboundPrompt(messageId, promptText, deliverAs);
+    try {
+      send();
+      return { kind: "sent" };
+    } catch (error) {
+      if (startsRun) this.cancelDispatch(messageId);
+      else this.#origins.forget(messageId);
+      return { kind: "failed", error };
+    }
   }
 
   /** 本回合认领到的消息，未认领到时 undefined。工具调用绑定要用 */
@@ -339,16 +421,28 @@ export class Bridge {
    * 单会话档（`multiChat` 关）保持原有行为：出站一律走已绑定会话，不查登记表。
    */
   get turnTarget(): string | undefined {
-    if (!this.#agentActive) return undefined;
+    if (!this.isAgentActive) return undefined;
     if (!this.#config.multiChat) return this.#gateway.boundChatId;
-    return this.#origins.chatOf(this.#originMessageId) ?? this.#gateway.boundChatId;
+    const messageId = this.#originMessageId ?? this.#dispatchMessageId;
+    return this.#origins.chatOf(messageId) ?? this.#gateway.boundChatId;
+  }
+
+  /** 当前运行所属的精确对话；同一群的两个话题不是同一个 steer 目标。 */
+  get turnConversation(): { chatId: string; threadId?: string } | undefined {
+    if (!this.isAgentActive) return undefined;
+    const messageId = this.#originMessageId ?? this.#dispatchMessageId;
+    // 即使 multiChat 关闭也要先保留来源 thread；它只限制 chat 范围，不代表
+    // 同一群的主干和所有话题可以互相 steer。只有终端轮没有来源时才退回绑定会话。
+    return this.#origins.conversationOf(messageId) ?? (
+      this.#gateway.boundChatId === undefined ? undefined : { chatId: this.#gateway.boundChatId }
+    );
   }
 
   /**
    * 同 `turnTarget`，但带上话题信息 —— **出站一律用这个**。
    *
-   * `turnTarget` 只回 chatId，`deferred.ts` 拿它做「是不是同一个对话」的比较，
-   * 那个语义不能变，所以另开一个而不是改它的返回类型。
+   * `turnTarget` 只回 chatId，供旧的出站/状态展示使用；延迟判定另走
+   * `turnConversation`，因为同一群里的不同话题也不能互相 steer。
    *
    * 触发这轮的消息不在话题里（普通群 / 私聊 / 终端敲的字）时，这里退化成
    * `{ chatId }`，与加话题之前完全一致。
@@ -356,8 +450,9 @@ export class Bridge {
   get turnSendTarget(): SendTarget | undefined {
     const chatId = this.turnTarget;
     if (chatId === undefined) return undefined;
-    if (!this.#config.multiChat) return { chatId };
     const target = this.#origins.targetOf(this.#originMessageId);
+    // 单会话档仍要保留已绑定群里的 thread；multiChat 只决定能否跨 chat，
+    // 不是「是否支持话题」开关。来源不是绑定 chat 时继续退回旧的绑定目标。
     return target?.chatId === chatId ? target : { chatId };
   }
 
@@ -367,18 +462,28 @@ export class Bridge {
    */
   settleAgent(): void {
     this.#agentActive = false;
+    const reservedMessageId = this.#dispatchMessageId;
+    this.#dispatchReserved = false;
+    this.#dispatchMessageId = undefined;
+    this.#dispatchAccepted = false;
     if (this.#originMessageId !== undefined) {
       this.#origins.forget(this.#originMessageId);
       this.#originMessageId = undefined;
     }
+    if (reservedMessageId !== undefined) this.#origins.forget(reservedMessageId);
+    this.#originPrompt = undefined;
   }
 
   /** 这条消息是否该扣住，等当前回合跑完再单独成回合。理由见 deferred.ts */
-  shouldDefer(chatId: string): boolean {
+  shouldDefer(messageId: string, deliverAs?: "steer" | "followUp"): boolean {
+    // reservation 期间 pi core 还没进入 streaming；此时把 ! 当 steer 投进去，
+    // streamingBehavior 会被忽略，反而并发开启第二个 run。必须等真实 agent_start。
+    if (this.#dispatchReserved && !this.#agentActive) return true;
     return shouldDefer({
       streaming: this.isAgentActive,
-      turnTarget: this.turnTarget,
-      chatId,
+      turnTarget: this.turnConversation,
+      incomingTarget: this.#origins.conversationOf(messageId),
+      deliverAs,
     });
   }
 
@@ -397,24 +502,34 @@ export class Bridge {
     return this.#deferred.takeAll();
   }
 
-  startTurn(): void {
+  startTurn(): string | undefined {
     // 一次运行里自动重试会开多个回合，所以这行要在下面的去重之前 ——
     // 它跟的是 pi 的运行，不是飞书流
+    const dispatchedMessageId = this.#dispatchMessageId;
     this.#agentActive = true;
-    if (this.#turn) return;
+    this.#dispatchReserved = false;
+    this.#dispatchMessageId = undefined;
+    this.#dispatchAccepted = false;
+    if (this.#turn) return dispatchedMessageId;
     this.#turnApproved = false;
     // 出站目标不再是回合开始时快照下来的字符串，而是每次按认领到的
     // messageId 回查 —— 见 turnTarget / turnSendTarget
     const target = this.turnSendTarget;
     const stream = new TurnStream();
+    const rawQuestion = this.#origins.questionOf(this.#originMessageId);
+    const question = rawQuestion?.trim() ? rawQuestion : this.#originPrompt;
+    const heading = question?.trim() ? renderQuestion(question) : "";
     const turn: TurnState = {
       stream,
       startedAt: this.#now(),
       tokens: 0,
-      transcript: "",
+      transcript: heading,
       streamFailed: false,
       pumping: Promise.resolve(),
     };
+    // 先把问题放进队列再启动 pump：飞书一建卡就能看出它对应哪条消息，
+    // 不必等模型吐出第一个 token；补发全文时也保留同一段上下文。
+    stream.push(heading);
     turn.pumping = this.#gateway
       .streamTurn(async (sink) => stream.pump(sink), target)
       .catch((err) => {
@@ -422,6 +537,7 @@ export class Bridge {
         this.#log(`飞书流式发送失败，将在回合结束后补发全文：${String(err)}`, "warning");
       });
     this.#turn = turn;
+    return dispatchedMessageId;
   }
 
   onUserPrompt(text: string, source: "interactive" | "feishu"): void {

@@ -15,6 +15,16 @@ test("按 messageId 查得到来源", () => {
   assert.equal(r.chatOf("om_没见过"), undefined);
 });
 
+test("卡片标题按 messageId 取飞书原始问题，不拿加工后的 agent prompt 冒充", () => {
+  const r = reg();
+  r.record(
+    { messageId: "om_1", chatId: "oc_群", senderId: "ou_1", text: "看下\n总共有多少个员工" },
+    "看下 总共有多少个员工\n[图片 img_x，123 字节]",
+  );
+
+  assert.equal(r.questionOf("om_1"), "看下\n总共有多少个员工");
+});
+
 test("按发给 pi 的原文认领触发这轮的消息", () => {
   // before_agent_start 带的 prompt 就是 sendUserMessage 传进去的原文，
   // 这是 pi 唯一提供的、能把「这个回合」和「哪条消息」对上的东西
@@ -117,6 +127,12 @@ test("话题里的消息：出站目标带 replyTo 和 inThread", () => {
   const r = new MessageOriginRegistry();
   r.record({ messageId: "om_1", chatId: "oc_1", senderId: "ou_1", threadId: "omt_9" });
   assert.deepEqual(r.targetOf("om_1"), { chatId: "oc_1", replyTo: "om_1", inThread: true });
+});
+
+test("对话身份保留 threadId，供 steer 区分同群不同话题", () => {
+  const r = new MessageOriginRegistry();
+  r.record({ messageId: "om_1", chatId: "oc_1", senderId: "ou_1", threadId: "omt_9" });
+  assert.deepEqual(r.conversationOf("om_1"), { chatId: "oc_1", threadId: "omt_9" });
 });
 
 test("普通消息：出站目标只有 chatId，行为与加话题之前一致", () => {
