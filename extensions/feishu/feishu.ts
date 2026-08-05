@@ -97,7 +97,7 @@ export class FeishuGateway implements GatewayLike {
     });
 
     // 解析 / 鉴权 / 兑现全在 approval-card.ts 的 handleCardAction 里，
-    // 与 broker 档共用同一份实现 —— 这段安全代码曾经是两份副本并且漂过一次。
+    // 所有解析、鉴权与兑现都集中在 approval-card.ts。
     //
     // requireBoundChat 只在单会话档开：multiChat 下卡片本来就是故意发到触发
     // 这轮的那个对话（可能是群），而 bound 还留在私聊 —— 要求「必须来自已绑定
@@ -252,7 +252,7 @@ export class FeishuGateway implements GatewayLike {
   }
 
   /**
-   * 面向指定会话的审批通道。卡片的发送/登记/竞速收尾与 broker 档共用。
+   * 面向指定会话的审批通道。卡片的发送、登记与竞速收尾都在此网关内完成。
    * to 省略时发往已绑定会话；多会话模式下由 Bridge 传入本回合的来源。
    */
   askerFor(to?: string | SendTarget): Asker {

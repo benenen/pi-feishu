@@ -18,7 +18,7 @@ export interface NormalizedLike {
 }
 
 /**
- * SDK 消息 → 本扩展的 InboundMessage。direct 与 broker 两档共用同一份映射。
+ * SDK 消息 → 本扩展的 InboundMessage。
  *
  * 抽出来是因为 InboundMessage 的字段基本都是可选或同类型的，两边各写一份时
  * 漏掉一个字段 TypeScript 一声不吭 —— `to` 参数就是这么丢的（见 gateway-arity.test.ts）。

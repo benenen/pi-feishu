@@ -5,12 +5,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { ConfigError, loadConfig, readConfigFile, type Config } from "./config.ts";
 import { createLogger } from "./log.ts";
 import { FeishuGateway } from "./feishu.ts";
-import net from "node:net";
 import fs from "node:fs";
-import { spawn } from "node:child_process";
 import { gateImagePath, sniffImageType, MAX_IMAGE_BYTES } from "./image.ts";
-import { BrokerGateway } from "./broker/gateway.ts";
-import { ensureBroker } from "./broker/ensure.ts";
 import {
   announceAndBind,
   bindToChat,
@@ -51,7 +47,6 @@ function resolveConfig(cwd: string): Config {
     ],
     env: process.env,
     cwd,
-    agentDir: getAgentDir(),
   });
 }
 
@@ -70,10 +65,7 @@ async function withTimeout(work: Promise<void>, ms: number, onTimeout: () => voi
 
 export default function (pi: ExtensionAPI) {
   // 注意：factory 里绝不启动任何后台资源，只声明。
-  // GatewayLike 是 Bridge 及其下游看到的耦合面，但 index.ts 这里还要调
-  // unbind/describeBoundChat/connect/disconnect 等两个具体类都有、但 GatewayLike
-  // 没声明的方法，所以用两个具体类的联合类型而不是 GatewayLike
-  let gateway: FeishuGateway | BrokerGateway | undefined;
+  let gateway: FeishuGateway | undefined;
   let bridge: Bridge | undefined;
   let config: Config | undefined;
 
@@ -90,7 +82,7 @@ export default function (pi: ExtensionAPI) {
    */
   function armDispatchTimer(
     br: Bridge,
-    gw: FeishuGateway | BrokerGateway,
+    gw: FeishuGateway,
     messageId: string,
     target: SendTarget | string,
   ): void {
@@ -116,7 +108,7 @@ export default function (pi: ExtensionAPI) {
   /** settled 或 watchdog 之后只放一条；它的 settled 会继续驱动下一条。 */
   async function releaseOneDeferred(
     br: Bridge,
-    gw: FeishuGateway | BrokerGateway,
+    gw: FeishuGateway,
   ): Promise<void> {
     if (br.isAgentActive) return;
     const next = br.takeDeferred();
@@ -150,68 +142,6 @@ export default function (pi: ExtensionAPI) {
     );
   }
 
-  /**
-   * broker 档的配对码由 broker 签发，这里只是转发请求、把结果显示在终端。
-   * broker 调用不自我包含异常，rejection 必须在这里兜住，不能逃进 pi 的事件循环。
-   */
-  async function requestBrokerPairingCode(
-    gw: BrokerGateway,
-    notify: (msg: string) => void,
-    prefix = "",
-  ): Promise<void> {
-    try {
-      const code = await gw.requestPairingCode();
-      notify(`${prefix}在要绑定的对话里发送配对码：\n\n    ${code}\n`);
-    } catch (err) {
-      notify(`${prefix}获取配对码失败：${String(err)}`);
-    }
-  }
-
-  /**
-   * broker 档下，连接前先确保 broker 在跑。
-   *
-   * 探活用连 socket 而不是查 pid：pid 会被复用，「能连上」才是我们真正关心的。
-   * 拉起用 detached + unref —— broker 必须活得比拉起它的这个 pi 会话久，
-   * 否则会话一退它就跟着死，别的会话跟着失联。
-   */
-  async function ensureBrokerRunning(cfg: Config): Promise<boolean> {
-    const result = await ensureBroker(
-      {
-        probe: () =>
-          new Promise<boolean>((resolve) => {
-            const sock = net.createConnection(cfg.brokerSocket);
-            let settled = false;
-            const done = (ok: boolean) => {
-              if (settled) return;
-              settled = true;
-              clearTimeout(timer);
-              sock.destroy();
-              resolve(ok);
-            };
-            const timer = setTimeout(() => done(false), 500);
-            sock.once("connect", () => done(true));
-            sock.once("error", () => done(false));
-          }),
-        spawn: () => {
-          const entry = path.join(cfg.repoRoot, "bin", "broker.ts");
-          const child = spawn(process.execPath, [entry], {
-            cwd: cfg.repoRoot,
-            detached: true,
-            stdio: "ignore",
-          });
-          child.unref();
-          return { pid: child.pid };
-        },
-        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-        now: () => Date.now(),
-        timeoutMs: 30_000,
-        pollMs: 250,
-      },
-      (msg) => log(msg),
-    );
-    return result !== "failed";
-  }
-
   // gateway 只在 connect() 返回后才赋值，光靠它挡不住在途的第二次 start：
   // autoStart 撞上手动 /feishu start，会建出两条 WS 连接抢同一批消息 ——
   // 正是 autoStart 默认关闭想避免的那件事。
@@ -243,9 +173,7 @@ export default function (pi: ExtensionAPI) {
     }
     config = cfg;
 
-    // GatewayLike 是唯一的耦合面，两种传输在这里分叉，
-    // Bridge 及其下游（renderer / risk / approval）完全无感
-    const gw = cfg.transport === "broker" ? new BrokerGateway(log) : new FeishuGateway(cfg, log);
+    const gw = new FeishuGateway(cfg, log);
     const br = new Bridge(cfg, gw, log);
 
     gw.onMessage((msg) => {
@@ -256,10 +184,6 @@ export default function (pi: ExtensionAPI) {
           br.recordInbound(msg);
           // 待配对时，未绑定状态下只认配对码 —— 任何其他消息都不该绑上来，
           // 否则「先握手再绑定」就形同虚设。
-          // broker 档下这个分支恒为假，是安全的死代码：broker 模式从不创建本地
-          // pairing（配对在 broker 侧靠 registry.matchCode + bound 帧完成），
-          // 且 broker 对未绑定会话的消息本就不会转发 message 帧过来（见
-          // broker/server.ts 的 deliver()），所以这里永远走不到。
           // 注意 match() 是一次性的，只有真要判定时才调，别在条件里顺手调用
           const gate = gateInbound({
             bound: gw.boundChatId !== undefined,
@@ -297,10 +221,8 @@ export default function (pi: ExtensionAPI) {
             if (control.kind === "stop") await stop((m) => void gw.sendText(m));
             else if (control.kind === "unbind") {
               // 先回执再解绑：解绑后 sendText 没有默认收件方，必须显式指定本会话。
-              // broker 档下解绑不签发新码，回执得说清楚下一步，否则用户会卡在
-              // 飞书里等一个永远不会发生的「下一条消息自动绑定」
               await gw.sendText(
-                renderUnbindNotice(gw instanceof BrokerGateway ? "broker" : "direct"),
+                renderUnbindNotice(),
                 msg.chatId,
               );
               gw.unbind();
@@ -360,18 +282,8 @@ export default function (pi: ExtensionAPI) {
       })();
     });
 
-    // 配了 broker 档就自动保证它在跑 —— 用户不该为了用飞书先去手动起个进程。
-    // 关掉 autoStartBroker 表示「由 supervisor 之类托管」，此时会话不去干预
-    if (gw instanceof BrokerGateway && cfg.autoStartBroker) {
-      if (!(await ensureBrokerRunning(cfg))) {
-        notify(`broker 未能就绪，无法启动飞书桥接。看日志：node scripts/brokerctl.js logs`);
-        return;
-      }
-    }
-
     try {
-      if (gw instanceof BrokerGateway) await gw.connect(cfg.brokerSocket, path.basename(cwd), cwd);
-      else await gw.connect();
+      await gw.connect();
     } catch (err) {
       // 凭据错、网络不通是新用户最常撞的两件事，必须给出本地化提示，
       // 而不是让异常冒到 pi 的通用错误通道里
@@ -380,14 +292,6 @@ export default function (pi: ExtensionAPI) {
     }
     gateway = gw;
     bridge = br;
-
-    // broker 档下绑定权在 broker 手里：bindTarget 的 operator/oc_xxx/none 三档
-    // 都不生效，统一走「向 broker 要配对码，终端显示」这条路。broker 服务端配对
-    // 成功时自己会往那个飞书对话发确认文案，这里不能再发一遍
-    if (gw instanceof BrokerGateway) {
-      await requestBrokerPairingCode(gw, notify, "飞书桥接已启动（broker 模式）。");
-      return;
-    }
 
     // 按 bindTarget 决定绑谁。绑不上都不是错误 —— 退回等第一条入站消息即可
     const greeting = `pi 会话已就绪（${cwd}），直接发消息即可。`;
@@ -423,8 +327,6 @@ export default function (pi: ExtensionAPI) {
       // 那会儿说「空闲」但下一条消息却被扣住，对不上
       streaming: bridge?.isAgentActive,
       turnApproved: bridge?.turnApproved,
-      // gateway 存在只说明「启动过」，broker 掉了它照样是 truthy
-      brokerConnected: gateway instanceof BrokerGateway ? gateway.connected : undefined,
     });
   }
 
@@ -464,8 +366,6 @@ export default function (pi: ExtensionAPI) {
         if (!gateway) notify("飞书桥接未在运行");
         else if (gateway.boundChatId !== undefined) {
           notify("已绑定会话。要换绑请先 /feishu unbind");
-        } else if (gateway instanceof BrokerGateway) {
-          await requestBrokerPairingCode(gateway, notify);
         } else {
           pairing ??= createPairing(config?.pairingTtlMs ?? 600_000, randomInt);
           issuePairingCode(notify);
@@ -473,12 +373,7 @@ export default function (pi: ExtensionAPI) {
       }
       else if (sub === "unbind") {
         if (!gateway) notify("飞书桥接未在运行");
-        else if (gateway instanceof BrokerGateway) {
-          // 绑定权在 broker 手里：本地 unbind() 只是让这边不再认那个 chatId，
-          // 真正的解绑要靠已经在 unbind() 里发出的 unbind 帧
-          gateway.unbind();
-          await requestBrokerPairingCode(gateway, notify, "已解绑。");
-        } else {
+        else {
           gateway.unbind();
           if (config?.bindTarget === "code") {
             pairing ??= createPairing(config.pairingTtlMs, randomInt);
@@ -642,10 +537,6 @@ export default function (pi: ExtensionAPI) {
       const cfg = config;
       const gw = gateway;
       if (!cfg || !gw) throw new Error("飞书桥接没在运行，先在终端执行 /feishu start");
-      if (!(gw instanceof FeishuGateway)) {
-        throw new Error("broker 档还没实现发图（协议要加一种帧），当前只有 direct 档支持");
-      }
-
       // 目录判定按 realpath 走，否则白名单目录里放个软链就能把任意文件带出去。
       // 文件不存在时 realpathSync 会抛，退回原串 —— 后面 readFile 会给出更准的错。
       const gate = gateImagePath({

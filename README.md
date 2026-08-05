@@ -83,9 +83,6 @@ pi install git:github.com/you/pi-feishu
 | `autoStart` | `false` | 会话启动时自动连接。**多开 pi 会抢消息** —— 同一个 appId 只有一条长连接，飞书把事件推给哪一条不确定，保持 `false` 更安全 |
 | `repoRoot` | 当前 cwd | 判定「写到范围外」的基准，也是 `feishu_send_image` 默认允许的发图范围 |
 | `imageDirs` | `[]` | 除仓库根外，还允许 `feishu_send_image` 发图的目录。相对路径按 cwd 展开。**空数组是「只允许仓库内」，不是「不限」** —— 与 `groupAllowlist` 相反，那边放宽的是谁能找机器人说话，这边放宽的是什么文件能离开这台机器 |
-| `transport` | `"direct"` | `direct` 会话自己连飞书；`broker` 经本地 broker 进程共用一条长连接，多个会话可共用同一个飞书应用。详见下方「broker 模式」 |
-| `brokerSocket` | `<agentDir>/feishu-broker.sock` | 仅 `transport: "broker"` 用到。broker 进程监听的 Unix socket 路径。默认按 `getAgentDir()` 算出，**不是 cwd** —— broker 进程和各 pi 会话必须算出同一个路径才连得上，跨用户/跨 agent 目录部署时要显式填成同一个绝对路径 |
-| `autoStartBroker` | `true` | **仅 broker 档**：会话启动时若发现 broker 没在跑就自动拉起。交给 supervisor 托管时设为 `false` |
 
 > direct 模式的完整操作手册见 [`docs/direct.md`](docs/direct.md)：上手、命令、绑定方式、排障、冒烟清单。
 
@@ -163,117 +160,6 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   'https://open.feishu.cn/open-apis/contact/v3/scopes?user_id_type=open_id' | jq .data.user_ids
 ```
 
-## broker 模式（`transport: "broker"`）
-
-> 动手操作看 [`docs/broker.md`](docs/broker.md)：上手步骤、supervisor 托管、排障对照表、冒烟清单。
-
-上一节的前提是「一个飞书应用配一个 pi 会话」，根子在于**同一个 appId 只能有一条长连接**，
-飞书把事件推给哪条不确定。如果你就是想用**同一个飞书应用**同时服务多个 pi 会话（同一个人
-在同一个飞书对话里切换着跟不同项目的会话聊），direct 模式做不到，得换成 broker 模式：
-一个独立进程独占那条长连接，各 pi 会话经本地 Unix socket 接上它，收发消息和 chatId ↔ 会话的
-路由都交给它。
-
-### 部署方式
-
-broker 是一个不依赖 pi 进程存活的独立可执行入口：
-
-```bash
-node bin/broker.ts
-# 或作为已安装依赖的 bin 使用：
-pi-feishu-broker
-```
-
-它读的是跟扩展侧同一套配置文件（`~/.pi/agent/feishu.json` → `<项目>/.pi/feishu.json`），启动时
-连接飞书、在 `brokerSocket` 指定的路径监听，打印 `broker 已就绪：<socket 路径>` 后常驻，直到收到
-`SIGINT`/`SIGTERM`（`Ctrl-C` 或 `kill`）才会先关 socket 服务端、再断开飞书连接、然后退出。
-生产环境建议用 systemd / supervisor 之类的进程管理器托管，随机器重启自动拉起 —— broker 自己
-不会自动重连或自愈（见下）。
-
-各 pi 会话侧把 `transport` 配成 `"broker"` 即可，`brokerSocket` 通常不用填：默认按
-`getAgentDir()` 算出的路径与 broker 进程一致；如果 broker 进程和 pi 会话跑在不同的 agent 目录
-或不同用户下，两边必须显式配成同一个绝对路径，否则连不上。
-
-### socket 权限即鉴权
-
-broker 监听的 socket 文件建出来后立刻 `chmod 0600` —— 这是它**唯一**的鉴权手段：同一 Linux
-用户下的进程都能连、其他用户一律连不上。这意味着：
-
-- 同一用户下跑的**任何其他进程**（不限于 pi）只要连得上这个 socket，就能冒充某个已配对的
-  pi 会话收发飞书消息、发起审批。broker 模式默认信任「同一用户下的一切都是你自己的」，
-  不做更细粒度的进程级鉴权（没有 token，没有 `SO_PEERCRED` 校验）
-- 不要在多人共用同一个 Linux 账号的机器上用 broker 模式，除非你能保证同用户下不会跑到别人
-  的进程
-- 需要保密的是「谁能以这个用户身份跑代码」，socket 路径本身不构成秘密
-
-`send_text` 的收件方**受绑定关系约束**：显式指定的收件会话必须正是本会话已绑的那个，
-否则 broker 回 err。少了这一条，`send_text` 就是一个跨会话写入原语 —— 一个从未配对的
-连接也能以机器人身份往别人绑定的对话里发消息。
-
-### 卡片审批在 broker 档下的鉴权
-
-与 direct 档共用同一份实现（`approval-card.ts` 的 `handleCardAction`），两层：
-
-- 点击人必须在 `approverAllowlist` 里
-- 点击必须来自**这张卡片发往的那个对话** —— 登记未决审批时就把收件会话记下了，
-  别的对话里的点击一概不认
-
-direct 档在此之上还多一层：点击必须来自**当前**绑定的会话。broker 档没有这一层，
-因为一个 broker 服务多个对话，「当前绑定」是每个 pi 会话各自的概念，不在这一层。
-
-### broker 挂掉会怎样
-
-broker 挂了等于挂在它上面的**所有** pi 会话同时失联，**当前不做自动重连**：
-
-- 客户端网关发现连接断开后，把所有在途请求（发送中的消息、等待中的审批）一律 reject，
-  会话侧退回「飞书不可用」
-- 断线时会在 pi 的消息区报一条 error（「与 broker 的连接已断开…」），并清掉本地记着的
-  绑定关系 —— 不清的话 `/feishu status` 会理直气壮地说「已绑定 oc_x」，而实际上什么都
-  发不出去
-- 断线后 `/feishu status` 的「传输」一行会显示 `broker · **连接已断开**`，这是判断
-  「是 broker 挂了还是飞书那边出问题」最快的一眼
-- 新连接不会自动重试；需要人工重新拉起 broker 进程，再在每个受影响的 pi 会话里重新执行
-  `/feishu start`（配对关系不保留，要重新走一遍配对码）
-- 自动重连、断线重试队列留待后续，目前是纯手工运维
-
-broker **活着但不回帧**（进程被 SIGSTOP、内部卡死）也兜得住：会话侧每个请求有 30 秒上限，
-超时即 reject。没有这层上限的话，`Bridge.endTurn()` 会一直等下去，整个 agent 回合冻住，
-只能重启 pi。唯一的例外是审批 —— 人点按钮本来就可能更慢，它由 `approvalTimeoutMs` 管。
-
-**不要同时启动两个 broker 进程指向同一个 socket** —— 常见场景是进程管理器重启时旧进程还没
-退干净、或者手滑重复起了一个。`listen()` 会先探活：连得上说明有活着的 broker 正占用，直接
-报错「该 socket 已被另一个 broker 占用」并拒绝启动，不会把它当成崩溃残留的死文件删掉重建（早
-期版本会静默接管，导致旧进程被孤立但仍存活、仍握着飞书长连接——这正是 broker 模式本来要消灭
-的「同一 appId 多条长连接抢消息」，在 broker 自己这一层原样复现了一遍）。只有真正连不上
-（进程已经退出、文件是崩溃残留）才会当成死文件清理掉。
-
-### `bindTarget` 的限制
-
-broker 模式下 `bindTarget` **只有 `"code"`（配对码）生效**，`operator`、`oc_xxx`、`none`
-三档配了也不生效 —— 因为绑定权在 broker 手里：一个飞书 chatId 该路由给哪个 pi 会话，只有
-broker 的路由表知道，会话侧没法单方面替它决定绑谁。`/feishu start` 会直接向 broker 要一个
-配对码并显示在终端，体验上与 direct 模式下 `bindTarget: "code"` 一致。
-
-因此 broker 档下 `/feishu status` 里的「绑定会话」一栏不会去回显 `bindTarget`（那会说出
-「启动时私信操作员绑定」这种根本没发生过的事），统一显示「由 broker 按配对码绑定」。
-
-同理，在飞书里发 `/feishu unbind` **不会自动签发新配对码** —— 签发只能从终端发起。解绑的
-回执会明确告诉你下一步是回终端跑 `/feishu pair` 取码，别在飞书里干等「下一条消息自动绑定」，
-那在 broker 档下不会发生。
-
-### 该用 direct 还是 broker
-
-| | direct（默认） | broker |
-|---|---|---|
-| 部署 | 零额外进程，pi 会话自己连 | 需要单独起、管、护一个常驻进程 |
-| 一个飞书应用能配几个 pi 会话 | 1 个（长连接不能共用） | 多个，经同一个 broker 共用一条长连接 |
-| 某个 pi 会话挂了 | 只影响它自己 | 只影响它自己 |
-| broker 挂了 | 不涉及 | 挂在它上面的会话**全部**失联，需人工重启并重新配对 |
-| 鉴权 | 飞书侧白名单 + 卡片操作人白名单 | 前两者之外再加一层「同用户即信任」的 socket 权限 |
-| 适合场景 | 单会话，或愿意为每个项目配独立飞书应用 | 想用同一个飞书身份服务多个项目/会话，能接受多运维一个进程 |
-
-只有一个 pi 会话用飞书、或不介意一个项目配一个飞书应用时，direct 更简单，出问题的面更小。
-真正需要多个会话共用同一个飞书应用时才值得上 broker 模式这份运维成本。
-
 ## 配对码绑定（`bindTarget: "code"`）
 
 `none` 档下**任意一条入站消息都会绑定该会话** —— 谁先说话谁就拿到这个 pi 会话的
@@ -338,9 +224,6 @@ broker 的路由表知道，会话侧没法单方面替它决定绑谁。`/feish
 所以普通群和私聊的行为**一个字节都没变**。这条判定不能改成「一律按话题发」——
 普通群里那样会把每条回答都变成一个新话题。
 
-仅 `transport: "direct"`。broker 档下话题信息会在协议帧那层丢掉（帧只带 chatId），
-回复仍会掉在群主干上；要支持得给 `send_text` / `stream_begin` 帧加 `replyTo`。
-
 ### 发图片：`feishu_send_image`
 
 桥接启动后，agent 多一个工具 `feishu_send_image(path)`，把本地图片作为**图片消息**发进当前对话 ——
@@ -356,7 +239,7 @@ broker 的路由表知道，会话侧没法单方面替它决定绑谁。`/feish
 
 写文件、跑命令坏在「改坏了本地」，发图坏在「发出去就收不回来」—— 所以这条通道没有「默认放行」档。
 
-仅 `transport: "direct"` 支持；broker 档要给协议加一种图片帧，还没做。飞书单图上限 10MB。
+飞书单图上限 10MB。
 
 ## 开发
 
@@ -373,8 +256,6 @@ Node ≥ 24（依赖原生 TypeScript 类型剥离，无构建步骤）。
 
 > **先重启 pi 再验。** 扩展是 pi 启动时 import 一次的，改完代码 `/feishu stop` +
 > `/feishu start` **不会**重新加载 —— 那只是把网关关掉再打开，跑的还是旧模块。
-> broker 档另外还要重启 broker 进程（`node scripts/brokerctl.js restart`），
-> 它是独立进程，跟会话各自持有各自的代码副本。不重启就测，看到的是修改前的行为。
 
 - [ ] `/feishu start` 连接成功，`/feishu status` 显示运行中
 - [ ] 飞书发一条消息 → pi 收到并开始回合 → 飞书出现流式卡片，顶部显示对应问题原文
@@ -400,33 +281,3 @@ Node ≥ 24（依赖原生 TypeScript 类型剥离，无构建步骤）。
 - [ ] 群场景：让**不在** `approverAllowlist` 里的成员点「允许」→ 无效，日志出现「忽略非授权审批人」
 - [ ] 仓库里建一个指向仓库外的符号链接目录，让 agent 往它下面写新文件 → 弹审批
 - [ ] `/feishu stop` 后飞书消息不再进入 pi
-
-### broker 模式（`transport: "broker"`）
-
-同样需要真实飞书应用；额外需要能起一个独立的长驻进程。逐项验证：
-
-- [ ] 终端 1：`node bin/broker.ts`（或 `node --experimental-strip-types bin/broker.ts`，
-      或安装后用 `pi-feishu-broker`）→ 打印 `broker 已就绪：<socket 路径>`
-- [ ] 终端 2：`stat -c '%a' <socket 路径>` → 输出 `600`
-- [ ] 项目 `.pi/feishu.json` 配 `transport: "broker"` 后启动 pi、跑 `/feishu start` →
-      终端打印配对码；在要绑定的飞书对话里发送该码 → 收到「配对成功」
-- [ ] 两个不同项目（或同一项目开两个终端）的 pi 会话都配同一个飞书应用 + `transport: "broker"`，
-      分别用各自的配对码绑到两个不同的飞书对话 → 分别发消息，各回各的，不串台
-- [ ] broker 模式下把 `bindTarget` 配成 `"operator"` 或某个 `oc_xxx` → 确认它被忽略，
-      `/feishu start` 仍然走配对码流程
-- [ ] 已配对的会话里跑 `/feishu status` → 「传输」一行显示 `broker · 已连接 · <socket 路径>`，
-      「绑定会话」一栏说的是「由 broker 按配对码绑定」（不是 `bindTarget` 的原值）
-- [ ] 在飞书里发 `/feishu unbind` → 回执明确说要回终端跑 `/feishu pair` 取码，
-      而不是「下一条消息会重新绑定会话」
-- [ ] 终端 1 按 `Ctrl-C` 停掉 broker 进程 → 已配对的 pi 会话再发消息应提示「飞书不可用」
-      （不会自动重连）；pi 的消息区出现一条「与 broker 的连接已断开…」
-- [ ] 停掉 broker 之后跑 `/feishu status` → 「传输」一行显示「连接已断开」，
-      「绑定会话」不再显示旧的 chatId
-- [ ] 未配对的会话里跑一个长回合（不要发配对码）→ broker 的 stderr 里每个流 id 只出现
-      **一条**「收到未知流的 stream_chunk」，不是每个 delta 一条
-- [ ] 已配对的会话里跑一个会输出很多内容的长回合，中途让飞书流式失败（例如临时断网几秒）
-      → broker 进程**不退出**，回合结束后飞书里收到补发的全文
-- [ ] 重新拉起 broker、在受影响的 pi 会话里重新跑 `/feishu start` → 恢复正常，需要重新配对
-- [ ] 配置缺失（没有 `appId`/`appSecret`）时执行 `node bin/broker.ts` → 报出中文的
-      「缺少 appId（配置文件 appId 或环境变量 FEISHU_APP_ID）」之类的问题清单，退出码非零
-      （这一条不需要飞书凭据，随时可以自己跑）

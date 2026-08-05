@@ -30,10 +30,7 @@ export interface Config {
   bindTarget: string;
   /** 配对码有效期。过期即作废，需要重新 /feishu start 或 /feishu pair 签发 */
   pairingTtlMs: number;
-  /**
-   * 一个 pi 会话同时服务多个对话（私聊 + 群 @），回复回到消息来源。
-   * 仅 direct 档有效 —— broker 档下一个会话本就只绑一个对话。
-   */
+  /** 一个 pi 会话同时服务多个对话（私聊 + 群 @），回复回到消息来源。 */
   multiChat: boolean;
   /**
    * 开始处理一条入站消息时给它加的表情回应，充当「已读/在处理」的信号 ——
@@ -55,15 +52,6 @@ export interface Config {
    * 那边放宽的是谁能找机器人说话，这边放宽的是什么文件能离开这台机器。
    */
   imageDirs: string[];
-  /** direct：会话自己连飞书（默认）；broker：经本地 broker 进程共用一条连接 */
-  transport: "direct" | "broker";
-  /** broker 档下的 Unix socket 路径 */
-  brokerSocket: string;
-  /**
-   * broker 档下，会话启动时若发现 broker 没在跑就自动拉起。
-   * 交给 supervisor 之类托管时关掉它 —— 否则谁都能拉起一个不受管理的进程。
-   */
-  autoStartBroker: boolean;
 }
 
 export class ConfigError extends Error {
@@ -113,8 +101,6 @@ export interface LoadConfigArgs {
   files: (unknown | ConfigFile)[];
   env: Record<string, string | undefined>;
   cwd: string;
-  /** brokerSocket 默认值所在目录；缺省时退回 cwd（历史调用点不必都跟着改） */
-  agentDir?: string;
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
@@ -141,7 +127,7 @@ function readBoolean(v: unknown, key: string, fallback: boolean, problems: strin
   return v;
 }
 
-export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Config {
+export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
   const merged: Record<string, unknown> = {};
   const problems: string[] = [];
 
@@ -164,7 +150,6 @@ export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Confi
   if (!appSecret) problems.push("缺少 appSecret（配置文件 appSecret 或环境变量 FEISHU_APP_SECRET）");
 
   const autoStart = readBoolean(merged.autoStart, "autoStart", false, problems);
-  const autoStartBroker = readBoolean(merged.autoStartBroker, "autoStartBroker", true, problems);
   const requireMention = readBoolean(merged.requireMention, "requireMention", true, problems);
   const multiChat = readBoolean(merged.multiChat, "multiChat", false, problems);
 
@@ -225,17 +210,6 @@ export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Confi
       problems.push('bindTarget 必须是 "operator"、"none"、"code" 或以 oc_ 开头的会话 id');
     }
   }
-
-  let transport: "direct" | "broker" = "direct";
-  if (merged.transport !== undefined) {
-    if (merged.transport === "direct" || merged.transport === "broker") transport = merged.transport;
-    else problems.push('transport 必须是 "direct" 或 "broker"');
-  }
-
-  const brokerSocket =
-    typeof merged.brokerSocket === "string"
-      ? merged.brokerSocket
-      : path.join(agentDir ?? cwd, "feishu-broker.sock");
 
   let approvalMode: ApprovalMode = "balanced";
   if (merged.approvalMode !== undefined) {
@@ -311,8 +285,5 @@ export function loadConfig({ files, env, cwd, agentDir }: LoadConfigArgs): Confi
     approvalTimeoutMs,
     repoRoot,
     imageDirs,
-    transport,
-    brokerSocket,
-    autoStartBroker,
   };
 }

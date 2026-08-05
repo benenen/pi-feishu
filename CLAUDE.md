@@ -40,11 +40,10 @@ pi 事件 (agent_start / message_update / tool_execution_*) ──►│
 | `index.ts` | **只做接线**。注册 `pi.on(...)` 与 `/feishu` 命令，持有 gateway/bridge 的生命周期。工厂函数里绝不启动后台资源，只声明 |
 | `bridge.ts` | 编排层。回合状态机（`startTurn`/`endTurn`）、工具调用闸门（`gateToolCall`）、入站消息转 prompt |
 | `feishu.ts` | 飞书网关（direct 档）。包住 `createLarkChannel`，收敛 SDK 的事件与出站 API |
-| `inbound.ts` | SDK 消息 → `InboundMessage` 的映射，以及会话名称缓存。direct/broker 两档共用 |
+| `inbound.ts` | SDK 消息 → `InboundMessage` 的映射，以及会话名称缓存 |
 | `gate.ts` | 入站放行判定（`gateInbound`）。无依赖，bridge 与 renderer 共用同一份状态机 |
 | `deferred.ts` | 回合进行中来自其他对话的消息要扣住，等这轮跑完再单独成回合。见下方 |
 | `origin-registry.ts` | 消息级来源登记表：`messageId → chatId`，按原文认领回合来源，工具调用绑消息 |
-| `broker/` | broker 档。`gateway.ts` 是会话侧客户端，其余（`server`/`channel`/`registry`/`protocol`）跑在 broker 进程里 |
 | `image.ts` | 发图的准入判定：目录白名单（按 realpath）+ 魔数识别。纯函数，不碰文件系统 |
 | `risk.ts` | 安全判定。三档模型，详见下方 |
 | `approval.ts` | 多通道审批竞速（飞书卡片 vs 终端对话框），先到先得 |
@@ -176,7 +175,7 @@ handler 的 catch 吞掉，**消息就没了**。
 
 所以把 controller 交给 `run()` 之前一律包一层 `cumulativeSink()`（`turn-stream.ts`），
 每次给累计全文，`next.startsWith(prev)` 恒成立，SDK 走精确分支。两个网关各一处
-（`feishu.ts` 的 `streamTurn`、`broker/channel.ts` 的 `streamTo`），新增流式出口时照做。
+（`feishu.ts` 的 `streamTurn`），新增流式出口时照做。
 
 **注意这不是 markdown 转义问题** —— 排查时极容易看成「名字里的 `**` 没转义」而
 去改 renderer，方向就全错了。名字确实也要中和（`plain()`），但那是另一回事。
@@ -202,9 +201,6 @@ handler 的 catch 吞掉，**消息就没了**。
 出站一律用 `bridge.turnSendTarget` / `origins.targetOfToolCall`，不要用
 `turnTarget` —— 后者只回 chatId，是给 `deferred.ts` 做「是不是同一个对话」比较用的，
 两个语义别混。
-
-broker 档在 `BrokerGateway` 那层把 `SendTarget` 压回 chatId（协议帧不带 replyTo）。
-收下这个参数只是为了两个网关同签名，补 broker 支持时要动 `protocol.ts`。
 
 ### 外发通道没有「默认放行」档
 
@@ -295,7 +291,7 @@ Node 的类型剥离不做代码生成，所以**不能用构造函数参数属�
 手抄的替身会随 SDK 升级悄悄失真 —— 流式吞字那次就是替身对了、真链路没验。
 
 **改完代码要重启 pi 才生效**：扩展在 pi 启动时 import 一次，`/feishu stop` +
-`start` 只是关开网关，模块还是旧的；broker 档还要单独重启 broker 进程。
+`start` 只是关开网关，模块还是旧的。
 不重启就上飞书验，看到的是改之前的行为 —— 已经因此白排查过一轮。
 
 ## 配置

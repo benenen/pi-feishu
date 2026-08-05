@@ -182,7 +182,7 @@ test("伪造的 scope 值不被接受 —— 只认字面量 turn", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 卡片点击的鉴权 —— direct 与 broker 两档共用同一份实现
+// 卡片点击的鉴权
 // ---------------------------------------------------------------------------
 
 /** 构造一个卡片点击事件 */
@@ -241,23 +241,6 @@ test("卡片鉴权：非授权审批人的点击一律忽略，并留一条 warn
   assert.equal(reg.size, 1, "不能被兑现");
   assert.ok(logs.some((l) => l.includes("ou_路人")));
   void pending;
-});
-
-test("卡片鉴权：broker 档也要校验会话 —— 点击必须来自卡片发往的那个对话", () => {
-  const reg = new ApprovalRegistry();
-  reg.register("ap-1", "om_1", "oc_X");
-  const logs: string[] = [];
-  // broker 档不传 requireBoundChat（一个 broker 服务多个对话，「当前绑定」
-  // 是每个 pi 会话各自的概念）——但登记时记下的 chatId 这层必须在
-  const out = handleCardAction({
-    registry: reg,
-    event: click("oc_Y", "ou_审批人", ALLOW_VALUE),
-    approverAllowlist: ["ou_审批人"],
-    log: (m) => logs.push(m),
-  });
-  assert.equal(out, undefined);
-  assert.equal(reg.size, 1, "不能被兑现");
-  assert.ok(logs.some((l) => l.includes("oc_Y")), "要留痕");
 });
 
 test("卡片鉴权：direct 档额外要求点击来自当前绑定的会话", () => {
@@ -349,7 +332,7 @@ test("卡片鉴权：不属于本扩展的 value 直接忽略，连鉴权都不�
 });
 
 // ---------------------------------------------------------------------------
-// askViaCard —— direct 的 cardAsker 与 broker 的 askCard 共用的那段
+// askViaCard
 // ---------------------------------------------------------------------------
 
 test("askViaCard：发出卡片、登记未决，被兑现后返回裁决", async () => {

@@ -191,13 +191,7 @@ export interface CardActionInput {
   registry: ApprovalRegistry;
   event: CardActionLike;
   approverAllowlist: string[];
-  /**
-   * direct 档传 true 并给出 boundChatId：点击还必须来自**当前**绑定的会话，
-   * 未绑定（boundChatId 为 undefined）时一律拒。
-   *
-   * broker 档不传 —— 一个 broker 服务多个对话，「当前绑定」是每个 pi 会话
-   * 各自的概念，不在这一层；这一层由登记时记下的 chatId 兜住。
-   */
+  /** 单会话档点击还必须来自当前绑定的会话；未绑定时一律拒绝。 */
   requireBoundChat?: boolean;
   boundChatId?: string;
   log: LogFn;
@@ -210,9 +204,7 @@ export interface CardActionInput {
  * **只有去重和串行化，没有任何白名单过滤**。不自己鉴权的话，群里任何看得见卡片
  * 的人都能点「允许」—— 让 agent 干活的人自己批准自己，闸门等于没有。
  *
- * direct（feishu.ts）与 broker（broker/channel.ts）两档共用这一份实现：
- * 这段逻辑曾经是逐字复制的两份，并且**已经漂过一次** —— broker 版把会话校验
- * 整个漏掉了，任何 allowlist 成员在任何对话里都能点动别人的卡片。
+ * direct 网关使用这一份实现，所有点击都经过同样的会话与操作者校验。
  */
 export function handleCardAction(input: CardActionInput): CardSettlement | undefined {
   const { registry, event, approverAllowlist, log } = input;
@@ -265,8 +257,7 @@ export interface AskViaCardInput {
 }
 
 /**
- * 发一张审批卡片并等它被兑现。direct 的 `cardAsker` 与 broker 的 `askCard`
- * 共用这一份实现 —— 两边只是「往哪个会话发」的来源不同。
+ * 发一张审批卡片并等它被兑现。
  *
  * 竞速（飞书卡片 vs 终端对话框）可能在卡片还没发出去时就被别的通道结束掉。
  * abort 事件不会补发给事后才挂上的监听器，所以必须在 await 之前就把它接住。

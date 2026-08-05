@@ -1,7 +1,6 @@
 # direct 模式操作手册
 
 默认模式，不需要任何额外进程 —— pi 会话自己连飞书。
-（另一种是 broker 模式，见 [`broker.md`](broker.md)；什么时候该换过去，本文末尾有对照。）
 
 ## 五分钟上手
 
@@ -19,8 +18,7 @@
 }
 ```
 
-`transport` 不用写，默认就是 `direct`。凭据也可以走环境变量
-`FEISHU_APP_ID` / `FEISHU_APP_SECRET`，优先级最高。
+凭据也可以走环境变量 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，优先级最高。
 
 **`approverAllowlist` 是必填的**，而且必须是你在**这个飞书应用**下的 open_id。
 
@@ -268,7 +266,6 @@ pi 把直接投递的排队消息（`followUp` / `steer`）并进**同一个** a
 - **`autoStart` 保持 `false`**（默认），否则你在任意目录开 pi 都会自动连上来抢
 - 要多个会话同时用飞书，**一个项目配一个飞书应用**：项目里放 `<项目>/.pi/feishu.json`
   写各自的 `appId` / `appSecret` / `approverAllowlist`，它会覆盖全局配置
-- 不想为每个项目建应用，就换 [broker 模式](broker.md)
 
 > `.pi/feishu.json` 里有 `appSecret`。放进 git 仓库前先把 `.pi/` 加进 `.gitignore`，
 > 或者凭据走环境变量、只把非密钥项写文件。
@@ -285,19 +282,6 @@ pi 把直接投递的排队消息（`followUp` / `steer`）并进**同一个** a
 | `/feishu start` 报「飞书连接失败」 | 凭据错或网络不通 | 核对 appId/appSecret；确认能出网到 `open.feishu.cn` |
 | 配置改了不生效 | 配置在 `start()` 时读一次 | `/feishu stop` + `/feishu start` |
 | 改了配置文件仍然不生效 | 改错了地方 | 路径是 `~/.pi/**agent**/feishu.json`，不是 `~/.pi/feishu.json` |
-
-## direct 还是 broker
-
-| | direct（默认） | broker |
-|---|---|---|
-| 额外进程 | 无 | 需要起、管、护一个常驻进程 |
-| 一个飞书应用能配几个会话 | 1 个 | 多个 |
-| 一个会话能接几个对话 | 多个（`multiChat`），共用一份上下文 | 1 个，各会话上下文独立 |
-| 某个会话挂了 | 只影响它自己 | 只影响它自己 |
-| broker 挂了 | 不涉及 | 挂在它上面的会话**全部**失联 |
-
-只有一个会话用飞书、或愿意一项目一应用 → **direct**。
-多个会话要共用同一个飞书身份、且需要各自独立上下文 → **broker**。
 
 ## 冒烟清单
 

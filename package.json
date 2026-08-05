@@ -12,9 +12,6 @@
       "./extensions"
     ]
   },
-  "bin": {
-    "pi-feishu-broker": "./bin/broker.ts"
-  },
   "scripts": {
     "test": "node --test \"test/**/*.ts\"",
     "typecheck": "tsc --noEmit"

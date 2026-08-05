@@ -28,15 +28,12 @@ export interface GatewayLike {
   /** to 省略时发往网关的默认收件方 */
   streamTurn(run: (sink: AppendSink) => Promise<void>, to?: string | SendTarget): Promise<void>;
   sendText(markdown: string, to?: string | SendTarget): Promise<void>;
-  /**
-   * 发图片。可选：broker 档还没实现（协议要加一种帧），direct 档才有。
-   * 收字节不收路径 —— 路径准入是 `image.ts` 的事，见 FeishuGateway.sendImage。
-   */
+  /** 发图片。收字节不收路径 —— 路径准入是 `image.ts` 的事。 */
   sendImage?(png: Buffer, to?: string | SendTarget): Promise<void>;
   downloadImage(fileKey: string): Promise<Buffer | undefined>;
   /**
    * 给消息加表情回应，充当「已读/在处理」的信号。
-   * 可选：不是所有传输都支持；失败绝不能影响消息处理本身。
+   * 失败绝不能影响消息处理本身。
    */
   react?(messageId: string, emoji: string): Promise<void>;
   /**
