@@ -16,6 +16,7 @@ import {
 import type { Config } from "./config.ts";
 import { DeferredQueue, shouldDefer, type DeferredMessage } from "./deferred.ts";
 import { MessageOriginRegistry } from "./origin-registry.ts";
+import { AgentOriginRegistry, dispatchedSessionOf, noticeSessionOf } from "./agent-origin.ts";
 export { gateInbound, type GateState, type InboundGate } from "./gate.ts";
 import type { InboundMessage } from "./feishu.ts";
 import type { SendTarget } from "./types.ts";
@@ -48,6 +49,23 @@ export interface GatewayLike {
  * （挂住而不是拒绝），无上限的 await 会让 endTurn 永不返回。
  */
 const STREAM_DRAIN_TIMEOUT_MS = 15_000;
+
+/**
+ * 单个回合最多往飞书转发多少字符，超了就停流并提示。
+ *
+ * 模型在超长上下文里会退化成复读机 —— 实测一次：boss 会话堆到 30 万 token 后，
+ * `deepseek-v4-flash-0731` 一条消息里把「收到记忆上下文…我调用 asd_peek 工具」
+ * 复读了 470 遍、36126 字符，一个工具都没调，直到撞满 `maxTokens` 才被
+ * `stopReason: "length"` 截断。这些 delta 经 `onTextDelta` 原样流到飞书，
+ * 超出单卡容量后 SDK 不断 rollover，操作员那边就是一条接一条的卡片刷屏。
+ *
+ * 退化本身要靠模型和上下文长度去治（那次的诱因是 `contextWindow` 配成 1000000，
+ * 压缩永不触发）。这里只做最后一道闸：**不让主 agent 的失控输出打扰到人**。
+ *
+ * 阈值取得比任何正常输出都宽 —— 那次会话 705 条消息里，没被复读污染的
+ * assistant 消息**没有一条超过 3000 字符**。32k 是它的 10 倍，正常回合撞不到。
+ */
+const TURN_OUTPUT_LIMIT = 32_000;
 
 export type ControlCommand =
   | { kind: "status" }
@@ -200,6 +218,10 @@ interface TurnState {
   /** 流式失败时用于补发的全文副本 */
   transcript: string;
   streamFailed: boolean;
+  /** 已经撞上 TURN_OUTPUT_LIMIT，本回合不再转发正文 */
+  truncated: boolean;
+  /** 卡片已经建了（`streamTurn` 已调用）。出站目标就是那一刻定死的 */
+  streaming: boolean;
 }
 
 export class Bridge {
@@ -210,6 +232,23 @@ export class Bridge {
    * 「最近一条是谁」的全局变量。详见 origin-registry.ts。
    */
   #origins: MessageOriginRegistry;
+
+  /**
+   * pi-asd 子 agent 的来源登记：session 名 → 当初派活那个对话。详见 agent-origin.ts。
+   *
+   * 和 `#origins` 是两把不同的钥匙，不能合并：那张按 messageId 索引，回答「这个
+   * 回合是谁发起的」；这张按 session 名索引，回答「这个子 agent 是谁派的」——
+   * watcher 的推送不是任何消息的回复，只有后一把钥匙查得到。
+   */
+  #agentOrigins = new AgentOriginRegistry();
+
+  /**
+   * 本回合是被哪个子 agent 的推送带起来的（`message_start` 上认出来）。
+   *
+   * 只在**认领不到消息来源**时才用得上，见 `#autonomousTarget`。`settleAgent()`
+   * 里清 —— 和 `#originMessageId` 同寿命，绝不能漏到下一个回合。
+   */
+  #agentTarget: SendTarget | undefined;
 
   /**
    * 本次 pi 运行认领到的那条消息。由 `claimTurnOrigin()` 在 `before_agent_start`
@@ -274,6 +313,7 @@ export class Bridge {
   readonly #log: LogFn;
   readonly #now: () => number;
   readonly #drainTimeoutMs: number;
+  readonly #outputLimit: number;
 
   constructor(
     config: Config,
@@ -281,12 +321,14 @@ export class Bridge {
     log: LogFn,
     now: () => number = () => Date.now(),
     drainTimeoutMs: number = STREAM_DRAIN_TIMEOUT_MS,
+    outputLimit: number = TURN_OUTPUT_LIMIT,
   ) {
     this.#config = config;
     this.#gateway = gateway;
     this.#log = log;
     this.#now = now;
     this.#drainTimeoutMs = drainTimeoutMs;
+    this.#outputLimit = outputLimit;
     this.#origins = new MessageOriginRegistry(now);
   }
 
@@ -304,12 +346,58 @@ export class Bridge {
     }
   }
 
+  /**
+   * 正文出口，带熔断。见 TURN_OUTPUT_LIMIT。
+   *
+   * 闸门卡在 `transcript` 的长度上而不是只掐 `stream`：`transcript` 同时是
+   * 流式失败时补发全文的载荷（见 endTurn），只掐流的话失控输出会原样变成
+   * 一条超长普通消息发出去 —— 换个姿势刷屏而已。
+   */
   #push(chunk: string): void {
+    this.#safe(() => {
+      const turn = this.#turn;
+      if (!turn || turn.truncated || chunk === "") return;
+
+      const remaining = this.#outputLimit - turn.transcript.length;
+      if (chunk.length <= remaining) {
+        turn.transcript += chunk;
+        turn.stream.push(chunk);
+        this.#startStreaming(turn);
+        return;
+      }
+
+      // 截断这一块并封口。剩余额度可能是 0 甚至负数（上一块正好压线），
+      // slice 对负数会从尾部取，所以先夹到 [0, ∞)
+      const head = chunk.slice(0, Math.max(0, remaining));
+      const notice = renderNotice(
+        `本回合输出已超过 ${this.#outputLimit} 字符，疑似模型复读，后续内容不再转发到飞书（终端仍完整）`,
+      );
+      turn.truncated = true;
+      turn.transcript += head + notice;
+      turn.stream.push(head + notice);
+      this.#startStreaming(turn);
+      this.#log(
+        `回合输出超过 ${this.#outputLimit} 字符，已停止向飞书转发本回合剩余内容`,
+        "warning",
+      );
+    });
+  }
+
+  /**
+   * 绕过熔断的出口，只给回合收尾用。
+   *
+   * 熔断之后仍要让操作员看到「这一回合结束了、用了多久」，否则卡片停在
+   * 提示那一行，看起来像 pi 挂死了。这行是固定长度的页脚，不是失控内容。
+   */
+  #pushFinal(chunk: string): void {
     this.#safe(() => {
       const turn = this.#turn;
       if (!turn) return;
       turn.transcript += chunk;
       turn.stream.push(chunk);
+      // 回合页脚也是内容 —— 一个字都没产出的回合到这里才建卡，
+      // 保证「startTurn 过的回合最终一定建过一次卡」这条不变。
+      this.#startStreaming(turn);
     });
   }
 
@@ -318,6 +406,34 @@ export class Bridge {
     msg: { messageId: string; chatId: string; senderId: string; text?: string; threadId?: string },
   ): void {
     this.#origins.record(msg);
+  }
+
+  /**
+   * `tool_execution_end` 上登记「这次调用把活派给了哪个子 agent」。
+   *
+   * 记的是**当前回合的出站目标**：派活这一刻我们还知道是谁在说话，等 watcher
+   * 一两分钟后把结果推回来时就没有任何线索了。不是 pi-asd 的派活工具直接忽略。
+   */
+  noteToolResult(toolName: string, result: unknown): void {
+    const session = dispatchedSessionOf(toolName, result);
+    if (session === undefined) return;
+    const target = this.turnSendTarget;
+    if (target === undefined) return;
+    this.#agentOrigins.bind(session, target);
+  }
+
+  /**
+   * `message_start` 上认出 pi-asd 的 watcher 推送，把本回合改投回派活那个对话。
+   *
+   * 时序上这条消息在 `agent_start` **之后**才到（pi 的 agent loop 先发 agent_start
+   * 再逐条发输入消息的 message_start），所以 `startTurn` 那时还不知道该发去哪 ——
+   * 这正是它必须等到有内容再建卡的原因，见 `#startStreaming`。
+   */
+  noteCustomMessage(message: unknown): void {
+    const session = noticeSessionOf(message);
+    if (session === undefined) return;
+    // 查不到就保持 undefined，退回默认收件方 —— 没线索时不许猜
+    this.#agentTarget = this.#agentOrigins.targetOf(session);
   }
 
   /** 登记会开新 run 的 prompt；并入当前 run 的 steer 没有 before_agent_start，不能留索引 */
@@ -421,7 +537,19 @@ export class Bridge {
     if (!this.isAgentActive) return undefined;
     if (!this.#config.multiChat) return this.#gateway.boundChatId;
     const messageId = this.#originMessageId ?? this.#dispatchMessageId;
-    return this.#origins.chatOf(messageId) ?? this.#gateway.boundChatId;
+    return (
+      this.#origins.chatOf(messageId) ?? this.#autonomousTarget?.chatId ?? this.#gateway.boundChatId
+    );
+  }
+
+  /**
+   * 子 agent 推送带来的出站目标 —— **只在认领不到消息来源时**有效。
+   *
+   * 认领得到就说明这一轮是某条飞书消息发起的（推送是以 followUp 并进来的），
+   * 那一轮属于提问的那个人，不能被一条顺路的 agent 通知改道。
+   */
+  get #autonomousTarget(): SendTarget | undefined {
+    return this.#originMessageId === undefined ? this.#agentTarget : undefined;
   }
 
   /** 当前运行所属的精确对话；同一群的两个话题不是同一个 steer 目标。 */
@@ -447,9 +575,10 @@ export class Bridge {
   get turnSendTarget(): SendTarget | undefined {
     const chatId = this.turnTarget;
     if (chatId === undefined) return undefined;
-    const target = this.#origins.targetOf(this.#originMessageId);
+    const target = this.#origins.targetOf(this.#originMessageId) ?? this.#autonomousTarget;
     // 单会话档仍要保留已绑定群里的 thread；multiChat 只决定能否跨 chat，
-    // 不是「是否支持话题」开关。来源不是绑定 chat 时继续退回旧的绑定目标。
+    // 不是「是否支持话题」开关。来源不是绑定 chat 时继续退回旧的绑定目标 ——
+    // 子 agent 的推送走的也是这条判断，所以单会话档下它同样跨不出绑定会话。
     return target?.chatId === chatId ? target : { chatId };
   }
 
@@ -469,6 +598,10 @@ export class Bridge {
     }
     if (reservedMessageId !== undefined) this.#origins.forget(reservedMessageId);
     this.#originPrompt = undefined;
+    // 和 #originMessageId 同寿命：漏清的话，下一个认领不到来源的回合（终端敲的字）
+    // 会被上一条 agent 推送的目标带走。登记表本身不清 —— 那个 session 还活着，
+    // 下一次推送还要按它回查。
+    this.#agentTarget = undefined;
   }
 
   /** 这条消息是否该扣住，等当前回合跑完再单独成回合。理由见 deferred.ts */
@@ -511,7 +644,6 @@ export class Bridge {
     this.#turnApproved = false;
     // 出站目标不再是回合开始时快照下来的字符串，而是每次按认领到的
     // messageId 回查 —— 见 turnTarget / turnSendTarget
-    const target = this.turnSendTarget;
     const stream = new TurnStream();
     const rawQuestion = this.#origins.questionOf(this.#originMessageId);
     const question = rawQuestion?.trim() ? rawQuestion : this.#originPrompt;
@@ -522,19 +654,37 @@ export class Bridge {
       tokens: 0,
       transcript: heading,
       streamFailed: false,
+      truncated: false,
+      streaming: false,
       pumping: Promise.resolve(),
     };
+    this.#turn = turn;
     // 先把问题放进队列再启动 pump：飞书一建卡就能看出它对应哪条消息，
     // 不必等模型吐出第一个 token；补发全文时也保留同一段上下文。
     stream.push(heading);
+    // 有问题可显示 = 这一轮是飞书消息发起的，来源已经认领到了，立刻建卡（行为不变）。
+    // heading 为空 = 认领不到来源（终端敲的字，或 pi-asd watcher 的推送）——
+    // 这时**不能**急着建卡：pi 的 agent loop 是先发 agent_start、再发输入消息的
+    // message_start，而「这是哪个子 agent 的推送」正是从后者认出来的。在这里定死
+    // 目标，推送就永远只能落进默认收件方。反正也没内容可发，等有话说了再建。
+    if (heading !== "") this.#startStreaming(turn);
+    return dispatchedMessageId;
+  }
+
+  /**
+   * 建卡并开始 pump。出站目标就是这一刻按 `turnSendTarget` 定死的，之后改不了 ——
+   * 飞书的流式卡片一旦建在某个会话里就搬不走。所以这个调用要尽量晚，晚到
+   * 「真的有内容要发」为止；见 startTurn 里那段。
+   */
+  #startStreaming(turn: TurnState): void {
+    if (turn.streaming) return;
+    turn.streaming = true;
     turn.pumping = this.#gateway
-      .streamTurn(async (sink) => stream.pump(sink), target)
+      .streamTurn(async (sink) => turn.stream.pump(sink), this.turnSendTarget)
       .catch((err) => {
         turn.streamFailed = true;
         this.#log(`飞书流式发送失败，将在回合结束后补发全文：${String(err)}`, "warning");
       });
-    this.#turn = turn;
-    return dispatchedMessageId;
   }
 
   onUserPrompt(text: string, source: "interactive" | "feishu"): void {
@@ -569,7 +719,7 @@ export class Bridge {
     const turn = this.#turn;
     if (!turn) return;
     this.#turnApproved = false;
-    this.#push(renderTurnEnd(this.#now() - turn.startedAt, turn.tokens));
+    this.#pushFinal(renderTurnEnd(this.#now() - turn.startedAt, turn.tokens));
     this.#turn = undefined;
     this.#toolStartedAt.clear();
     turn.stream.finish();

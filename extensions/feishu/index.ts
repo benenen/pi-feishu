@@ -439,6 +439,14 @@ export default function (pi: ExtensionAPI) {
     if (e.type === "text_delta") bridge?.onTextDelta(e.delta);
   });
 
+  // pi-asd 的 watcher 推送就是从这里认出来的。它触发的回合**没有**
+  // before_agent_start（pi 对 triggerTurn 的 custom message 直接跑 _runAgentPrompt），
+  // 所以上面那套按原文认领完全没有钥匙可用 —— 这条消息里的 details.session 是唯一线索。
+  // 时序上它在 agent_start 之后才到，startTurn 因此推迟到有内容再建卡，见 #startStreaming。
+  pi.on("message_start", (event) => {
+    bridge?.noteCustomMessage(event.message);
+  });
+
   pi.on("message_end", (event) => {
     const usage = (event.message as { usage?: { totalTokens?: number } }).usage;
     if (usage?.totalTokens) bridge?.addTokens(usage.totalTokens);
@@ -452,6 +460,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_execution_end", (event) => {
     bridge?.onToolEnd(event.toolCallId, event.isError);
+    // 派活的这一刻还知道是谁在说话；等 watcher 一两分钟后把结果推回来时就没线索了。
+    // 分成两次调用而不是并进 onToolEnd：一个管渲染，一个管路由，别混。
+    bridge?.noteToolResult(event.toolName, event.result);
   });
 
   pi.on("agent_end", async () => {

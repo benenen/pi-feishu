@@ -44,6 +44,7 @@ pi 事件 (agent_start / message_update / tool_execution_*) ──►│
 | `gate.ts` | 入站放行判定（`gateInbound`）。无依赖，bridge 与 renderer 共用同一份状态机 |
 | `deferred.ts` | 回合进行中来自其他对话的消息要扣住，等这轮跑完再单独成回合。见下方 |
 | `origin-registry.ts` | 消息级来源登记表：`messageId → chatId`，按原文认领回合来源，工具调用绑消息 |
+| `agent-origin.ts` | 子 agent 来源登记表：`session 名 → 派活那个对话`。pi-asd watcher 推起来的自主回合靠它路由，见下方 |
 | `image.ts` | 发图的准入判定：目录白名单（按 realpath）+ 魔数识别。纯函数，不碰文件系统 |
 | `risk.ts` | 安全判定。三档模型，详见下方 |
 | `approval.ts` | 多通道审批竞速（飞书卡片 vs 终端对话框），先到先得 |
@@ -108,9 +109,10 @@ Pi 的 wrapper 还会吞掉底层 Promise 的异步 preflight rejection，因此
 ### 回合来源只能靠 before_agent_start 的 prompt 认领
 
 pi 不提供「这个回合是哪条消息触发的」：`agent_start` 是空事件，`sendUserMessage`
-收不了元数据。唯一的钥匙是 `before_agent_start.prompt` —— 它就是 `sendUserMessage`
-收到的原字符串（`expandPromptTemplates: false`，pi 不改写），且恰好在 `agent_start`
-之前发出。
+收不了元数据。**入站消息**唯一的钥匙是 `before_agent_start.prompt` —— 它就是
+`sendUserMessage` 收到的原字符串（`expandPromptTemplates: false`，pi 不改写），且恰好在
+`agent_start` 之前发出。（扩展自己推起来的**自主回合**连这个事件都没有，另有一把钥匙，
+见下一节。）
 
 所以入站时把 `messageId → { chatId, senderId, question }` 和「发给 pi 的原文」一起登记进
 `origin-registry.ts`，`before_agent_start` 上按原文认领，出站一律按 messageId 回查。
@@ -125,6 +127,34 @@ pi 不提供「这个回合是哪条消息触发的」：`agent_start` 是空事
 历史上为这件事错过三版，根因都是**赌 pi 的内部顺序**：FIFO 队列（要求「一个回合
 恰好一个槽位」）、`input.text` 关联、会话条目倒推（要求 `agent_start` 时触发这轮的
 用户消息已在 `getEntries()` 里 —— 实测不成立）。
+
+### 自主回合（pi-asd 的 watcher 推送）另有一把钥匙，且卡片必须晚建
+
+扩展用 `pi.sendMessage(..., { triggerTurn: true })` 推起来的回合，在 pi 里走的是
+`sendCustomMessage` → `_runAgentPrompt`，**绕开了 `prompt()`，因此根本不发
+`before_agent_start`**。上一节那把钥匙对它完全无效，认领必然落空、出站退回网关默认
+收件方。实测症状：在群里 @ 派给子 agent 的活，一分五十秒后结果掉进了操作员私聊。
+
+pi-asd 的推送在 `details.session` 里报出它说的是哪个 session，于是补上第二把钥匙：
+
+1. `tool_execution_end` 上，`asd_spawn` / `asd_steer` / `asd_follow` / `asd_nav` 的返回带
+   `details.session` —— 那一刻回合来源还认领得到，把 `session → 出站目标` 记进
+   `agent-origin.ts`
+2. `message_start` 上认出 `customType === "pi-asd-agent"`，按 `details.session` 回查目标
+
+两条硬规矩：
+
+- **认领得到消息来源时，来源永远优先。** 推送在 boss 忙时是以 followUp 并进当前回合的，
+  那一轮属于提问的那个人，不能被一条顺路的 agent 通知改道（`#autonomousTarget` 只在
+  `#originMessageId === undefined` 时返回值）。
+- **认领不到来源的回合，`startTurn` 不许立刻建卡。** 飞书流式卡片一旦建在某个会话里就
+  搬不走，而 pi 的事件顺序是 `agent_start` → `message_start`：在 `startTurn` 里定死目标，
+  推送就永远只能落进默认收件方。所以 `#startStreaming` 推迟到「真的有内容要发」才调 ——
+  有 `question` 抬头的（飞书消息发起的）照旧立刻建卡，行为不变。
+
+只认 `customType` + `details.session` 这一对结构化字段，**不许**退回去解析通知正文里的
+`agent "xxx"`：那是给模型读的一句中文，拿它当协议，pi-asd 改一次措辞这里就静默失灵。
+认不出就退回默认收件方 —— 也就是没修之前的行为，不会发给**错误**的对话。
 
 ### 「飞书流开着」和「pi 忙不忙」是两个生命周期，混用会丢消息
 

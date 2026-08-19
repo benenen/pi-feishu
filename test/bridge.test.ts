@@ -125,6 +125,89 @@ test("流式收尾卡住时 endTurn 不会永久挂起，改为补发全文", as
   assert.ok(sent[0].includes("半截内容"));
 });
 
+/** 收下流式过程中真正送达飞书的每一段 */
+function collectingGateway(sink: string[], overrides: Partial<GatewayLike> = {}): GatewayLike {
+  return fakeGateway({
+    async streamTurn(run) {
+      await run({
+        async append(chunk) {
+          sink.push(chunk);
+        },
+      });
+    },
+    ...overrides,
+  });
+}
+
+test("单回合输出超过阈值就停止转发，并说明原因", async () => {
+  const appended: string[] = [];
+  const bridge = new Bridge(CONFIG, collectingGateway(appended), () => {}, () => 0, 1000, 100);
+
+  bridge.startTurn();
+  bridge.onTextDelta("A".repeat(60));
+  bridge.onTextDelta("B".repeat(60)); // 越过 100，只有前 40 个 B 能进去
+  bridge.onTextDelta("C".repeat(5000)); // 复读的部分，一个字都不该出现
+  await bridge.endTurn();
+
+  const sent = appended.join("");
+  assert.ok(sent.includes("A".repeat(60)), "阈值之前的内容要照常送达");
+  assert.ok(sent.includes("B".repeat(40)), "越界那一块要按剩余额度截断");
+  assert.ok(!sent.includes("B".repeat(41)), "不能多送一个字符");
+  assert.ok(!sent.includes("C"), "熔断之后的内容一概不转发");
+  assert.ok(sent.includes("不再转发"), "要告诉操作员为什么断了");
+});
+
+test("熔断之后回合结束的页脚仍要送达", async () => {
+  const appended: string[] = [];
+  const bridge = new Bridge(CONFIG, collectingGateway(appended), () => {}, () => 0, 1000, 50);
+
+  bridge.startTurn();
+  bridge.onTextDelta("X".repeat(5000));
+  await bridge.endTurn();
+
+  // 页脚是固定长度的收尾行，不是失控内容 —— 少了它卡片看起来像 pi 挂死了
+  assert.ok(appended.join("").includes("⏱"), "熔断不该把回合收尾一起吃掉");
+});
+
+test("熔断同样卡住补发全文的载荷，不许换个姿势刷屏", async () => {
+  const sent: string[] = [];
+  const bridge = new Bridge(
+    CONFIG,
+    fakeGateway({
+      // 挂住不返回，逼出 endTurn 的补发全文路径
+      streamTurn: () => new Promise<void>(() => {}),
+      async sendText(markdown) {
+        sent.push(markdown);
+      },
+    }),
+    () => {},
+    () => 0,
+    20,
+    100,
+  );
+
+  bridge.startTurn();
+  bridge.onTextDelta("D".repeat(200_000));
+  await bridge.endTurn();
+
+  assert.equal(sent.length, 1, "流式挂住时仍要补发一次");
+  assert.ok(!sent[0].includes("D".repeat(101)), "补发的全文必须是截断后的");
+  assert.ok(sent[0].length < 1000, `补发载荷不该超长，实际 ${sent[0].length}`);
+});
+
+test("正常长度的回合不受熔断影响", async () => {
+  const appended: string[] = [];
+  const bridge = new Bridge(CONFIG, collectingGateway(appended), () => {}, () => 0, 1000);
+
+  bridge.startTurn();
+  bridge.onTextDelta("一次正常的状态汇报".repeat(50));
+  await bridge.endTurn();
+
+  const sent = appended.join("");
+  assert.ok(sent.includes("一次正常的状态汇报".repeat(50)), "正常输出要原样送达");
+  assert.ok(!sent.includes("不再转发"), "不该误伤");
+});
+
 test("流式正常时不补发", async () => {
   const sent: string[] = [];
   const bridge = new Bridge(
@@ -1113,6 +1196,249 @@ test("终端敲字发起的回合：退回已绑定会话，不带话题", () =>
 
   bridge.claimTurnOrigin("我在终端敲的");
   bridge.startTurn();
+  // 认领不到来源的回合要等到有内容才建卡（见下一个用例），所以这里得先产出一点东西
+  bridge.onTextDelta("答案");
 
   assert.deepEqual(sink.streams, [{ chatId: "oc_bound" }]);
+});
+
+test("认领不到来源的回合，没有内容之前不建卡", () => {
+  // 建卡那一刻出站目标就定死了，而「这是哪个子 agent 的推送」要等 agent_start
+  // 之后的 message_start 才知道。急着建卡 = 推送永远只能落进默认收件方。
+  const sink = { streams: [] as unknown[], asks: [] as unknown[] };
+  const gw = { ...fullTargetGateway(sink), boundChatId: "oc_bound" };
+  const bridge = new Bridge(MULTI, gw, () => {}, () => 0, 1000);
+
+  bridge.claimTurnOrigin("我在终端敲的");
+  bridge.startTurn();
+
+  assert.deepEqual(sink.streams, []);
+});
+
+test("飞书消息发起的回合照旧立刻建卡 —— 来源当场就认领到了", () => {
+  const sink = { streams: [] as unknown[], asks: [] as unknown[] };
+  const bridge = new Bridge(MULTI, fullTargetGateway(sink), () => {}, () => 0, 1000);
+
+  claimFrom(bridge, "oc_g", "om_x", "问一句");
+  bridge.startTurn();
+
+  assert.deepEqual(sink.streams, [{ chatId: "oc_g" }], "不能因为改造把提问的即时反馈也拖没了");
+});
+
+test("一个字都没产出的回合，收尾时仍然建过一次卡", async () => {
+  const sink = { streams: [] as unknown[], asks: [] as unknown[] };
+  const gw = { ...fullTargetGateway(sink), boundChatId: "oc_bound" };
+  const bridge = new Bridge(MULTI, gw, () => {}, () => 0, 1000);
+
+  bridge.claimTurnOrigin("我在终端敲的");
+  bridge.startTurn();
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, [{ chatId: "oc_bound" }], "页脚也是内容，不能整轮无声无息");
+});
+
+// ── pi-asd 子 agent 的推送回哪个对话 ──────────────────────────────────
+//
+// watcher 的推送是「自主回合」：它不是任何消息的回复，`before_agent_start`
+// 根本不发，`claimTurnOrigin` 因此永远认领不到 —— 没修之前一律退回默认收件方，
+// 症状就是群里 @ 派的活、结果掉进操作员私聊。详见 agent-origin.ts 顶部。
+
+/** 走一遍真实链路：派活那次工具调用的返回 → 登记 */
+function dispatch(bridge: Bridge, session: string) {
+  bridge.noteToolResult("asd_spawn", {
+    content: [{ type: "text", text: `已派给 ${session}` }],
+    details: { session, agent: "claude", watching: true },
+  });
+}
+
+/** watcher 推送到达：pi 在 agent_start 之后才把这条 custom message 发出来 */
+function notice(bridge: Bridge, session: string) {
+  bridge.noteCustomMessage({
+    role: "custom",
+    customType: "pi-asd-agent",
+    content: `[pi-asd] agent "${session}" 已停下（历时 1m51s）。`,
+    details: { session },
+  });
+}
+
+test("watcher 推送触发的回合，发回当初派活的那个对话", async () => {
+  const sink = emptySink();
+  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
+
+  // 群里 @ 派活
+  claimFrom(bridge, "oc_group");
+  bridge.startTurn();
+  dispatch(bridge, "pi-ssh");
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  // 一分五十一秒后 watcher 推回结果：没有任何入站消息，认领不到来源
+  bridge.startTurn();
+  notice(bridge, "pi-ssh");
+  bridge.onTextDelta("ssh 已抓到今日天气");
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_group", "oc_group"], "结果必须回到派活的那个群");
+});
+
+test("推送并入正在跑的回合时，认领到的来源仍然优先", async () => {
+  const sink = emptySink();
+  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
+
+  // pi-ssh 是从私聊派出去的
+  claimFrom(bridge, "oc_dm");
+  bridge.startTurn();
+  dispatch(bridge, "pi-ssh");
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  // 群里正在问别的事，推送以 followUp 并进了这一轮 —— 这轮属于群，不能被改道
+  claimFrom(bridge, "oc_group");
+  bridge.startTurn();
+  notice(bridge, "pi-ssh");
+  bridge.onTextDelta("顺带一提");
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_dm", "oc_group"]);
+});
+
+test("不认识的 session 退回已绑定会话 —— 没线索时不许猜", async () => {
+  const sink = emptySink();
+  const gw = { ...targetTrackingGateway(sink), boundChatId: "oc_bound" };
+  const bridge = new Bridge(MULTI, gw, () => {}, () => 0, 1000);
+
+  claimFrom(bridge, "oc_group");
+  bridge.startTurn();
+  dispatch(bridge, "pi-ssh");
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  bridge.startTurn();
+  notice(bridge, "pi-别人手建的"); // 台账外的 session，从没经这里派过
+  bridge.onTextDelta("结果");
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_group", "oc_bound"]);
+});
+
+test("推送的目标不残留到下一个回合", async () => {
+  const sink = emptySink();
+  const gw = { ...targetTrackingGateway(sink), boundChatId: "oc_bound" };
+  const bridge = new Bridge(MULTI, gw, () => {}, () => 0, 1000);
+
+  claimFrom(bridge, "oc_group");
+  bridge.startTurn();
+  dispatch(bridge, "pi-ssh");
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  bridge.startTurn();
+  notice(bridge, "pi-ssh");
+  bridge.onTextDelta("结果");
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  // 再一个自主回合，这次和 pi-asd 无关（比如终端敲的字）
+  bridge.startTurn();
+  bridge.onTextDelta("别的事");
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_group", "oc_group", "oc_bound"]);
+});
+
+test("同一个 session 被另一个对话再次派活后，结果跟着最近那次走", async () => {
+  const sink = emptySink();
+  const bridge = new Bridge(MULTI, targetTrackingGateway(sink), () => {}, () => 0, 1000);
+
+  claimFrom(bridge, "oc_dm");
+  bridge.startTurn();
+  dispatch(bridge, "pi-ssh");
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  claimFrom(bridge, "oc_group");
+  bridge.startTurn();
+  bridge.noteToolResult("asd_steer", {
+    content: [{ type: "text", text: "已追加" }],
+    details: { session: "pi-ssh", watching: true },
+  });
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  bridge.startTurn();
+  notice(bridge, "pi-ssh");
+  bridge.onTextDelta("结果");
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_dm", "oc_group", "oc_group"]);
+});
+
+test("multiChat 关闭时推送也绝不跨会话", async () => {
+  const sink = emptySink();
+  const gw = { ...targetTrackingGateway(sink), boundChatId: "oc_bound" };
+  const bridge = new Bridge(CONFIG, gw, () => {}, () => 0, 1000);
+
+  claimFrom(bridge, "oc_group");
+  bridge.startTurn();
+  dispatch(bridge, "pi-ssh");
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  bridge.startTurn();
+  notice(bridge, "pi-ssh");
+  bridge.onTextDelta("结果");
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_bound", "oc_bound"], "单会话档的语义就是只发绑定会话");
+});
+
+test("推送回合流式失败时，补发的全文也回到派活的那个对话", async () => {
+  const texts: { text: string; to?: string }[] = [];
+  const gw = targetTrackingGateway({ streams: [], texts, asks: [] });
+  let failNext = false;
+  const failing: GatewayLike = {
+    ...gw,
+    async streamTurn(run, to) {
+      if (failNext) throw new Error("飞书限流");
+      return gw.streamTurn(run, to);
+    },
+  };
+  const bridge = new Bridge(MULTI, failing, () => {}, () => 0, 1000);
+
+  claimFrom(bridge, "oc_group");
+  bridge.startTurn();
+  dispatch(bridge, "pi-ssh");
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  failNext = true;
+  bridge.startTurn();
+  notice(bridge, "pi-ssh");
+  bridge.onTextDelta("结果");
+  await bridge.endTurn();
+
+  assert.equal(texts.at(-1)?.to, "oc_group", "补发全文发错对话，等于把内容漏给别人");
+});
+
+test("推送回合里的审批卡片也弹回派活的那个对话", async () => {
+  const asks: (string | undefined)[] = [];
+  const bridge = new Bridge(
+    MULTI,
+    targetTrackingGateway({ streams: [], texts: [], asks }),
+    () => {},
+    () => 0,
+    1000,
+  );
+
+  claimFrom(bridge, "oc_group");
+  bridge.startTurn();
+  dispatch(bridge, "pi-ssh");
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  bridge.startTurn();
+  notice(bridge, "pi-ssh");
+  await bridge.gateToolCall("bash", { command: "rm -rf x" }, undefined);
+
+  assert.deepEqual(asks, ["oc_group"], "弹错对话就是让不相干的人替别人批准");
 });
