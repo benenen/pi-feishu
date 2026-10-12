@@ -9,7 +9,8 @@
   "type": "module",
   "pi": {
     "extensions": [
-      "./extensions"
+      "./extensions/feishu/index.ts",
+      "./extensions/herdr/index.ts"
     ]
   },
   "scripts": {

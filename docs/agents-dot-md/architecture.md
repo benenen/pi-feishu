@@ -4,7 +4,9 @@
 一个 pi 扩展（`@earendil-works/pi-coding-agent`），把当前 pi 会话双向桥接到飞书：
 终端开的会话，手机上接着看、接着聊，危险工具调用在飞书弹卡片审批。
 
-`package.json` 里的 `pi.extensions: ["./extensions"]` 是 pi 的加载入口，
+`package.json` 里的 `pi.extensions` 显式列出两个加载入口：`extensions/feishu/index.ts`（飞书桥接）
+与 `extensions/herdr/index.ts`（herdr 通道）。必须是文件路径——目录形式（`["./extensions"]`）在
+`~/.pi/agent/extensions/` 符号链接安装方式下会报 `Cannot find module`。
 `extensions/feishu/index.ts` 的 default export 就是扩展工厂函数。
 
 ## 组件与调用方向
