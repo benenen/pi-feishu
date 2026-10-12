@@ -1,5 +1,5 @@
 # 安全与审批
-> 风险三档、外发准入、herdr 控制工具及卡片点击鉴权。
+> 风险四档、外发准入、herdr 控制工具及卡片点击鉴权。
 
 ## 安全闸门一律 fail-closed
 - `assessRisk` 抛错 → 按危险处理（`gateToolCall` 里有 try/catch，因为 async 函数的
@@ -10,7 +10,7 @@
 ## 外发通道没有「默认放行」档
 `feishu_send_image` 把本地文件送出这台机器，与写文件/跑命令不是一类风险：后两者坏在
 「改坏了本地」，它坏在「发出去就收不回来」。所以它在 `risk.ts` 里单列 `EXFIL_TOOLS`，
-**三个档位都判 risky**，`relaxed` 的 `allowPatterns` 也放不开它（那组只对 bash 生效）。
+**除 `auto-except-delete` 外三个档位都判 risky**，`relaxed` 的 `allowPatterns` 也放不开它（那组只对 bash 生效）。
 
 再往这个方向加工具（发文件、发日志、贴代码到外部）时照此办理：进 `EXFIL_TOOLS`，
 别指望 `assessRisk` 末尾那句 `return "safe"`。
@@ -24,7 +24,7 @@
 一个字都看不见 —— 这条通道**不经过 pi 的 `tool_call` 钩子**。反过来，pi 侧的 herdr 工具
 （`herdr_send_prompt` / `herdr_start_agent` / `herdr_stop_agent` / `herdr_send_keys`）
 也会绕过默认那句 `return "safe"`，所以它们在 `risk.ts` 里单列 `HERDR_CONTROL_TOOLS`，
-**三个档位都判 risky**（只读的 list/read/wait 不在此列）。往这个方向加工具照此办理。
+**除 `auto-except-delete` 外三档都判 risky**（只读的 list/read/wait 不在此列）。往这个方向加工具照此办理。
 
 飞书侧的 `/herdr` 只对 `approverAllowlist` 里的人生效（`msg.senderId`）——
 群场景下不这么拦，任何能 @ 机器人的群友都拿到了一条不用审批的后门。
@@ -48,7 +48,7 @@
 
 ## risk.ts 的判定模型
 
-三档，`balanced` 是默认：
+四档，`balanced` 是默认：
 
 - **`strict`** —— 安全清单：只有 read/grep/find/ls 免批。用清单而非黑名单是因为
   扩展和 MCP 能注册任意名字的工具，枚举危险名字必然漏
@@ -57,6 +57,12 @@
   且不含任何 shell 元字符
 - **`relaxed`** —— bash 走**黑名单**，与另两档相反。枚举危险必然有漏网，
   这是它用便利换来的代价
+- **`auto-except-delete`** —— 黑名单里只有一类：**删除文件**（`rm`/`rmdir`/`shred`/
+  `unlink`/`truncate`、`find -delete`/`find -exec rm`、`git rm`、`rsync --delete`，
+  以及工具名里带 delete/remove/unlink 的自定义工具）。其余一律放行 —— 它**刻意排在
+  `EXFIL_TOOLS` / `HERDR_CONTROL_TOOLS` 之前**，也跳过 write/edit 的仓库边界，是刻意
+  用闸门换省事的档位：只拦不可逆的删除，适合「agent 与本机环境完全可信」的场景。
+  命令拿不到或解析不了时在原始串上扫 `rm|rmdir|shred|unlink|truncate`，宁可多弹一次卡片
 
 改 `balanced` 的白名单时，核心不变量是「**评估的文本 ≠ 执行的 argv**」——
 本模块前四版反复栽在这里：

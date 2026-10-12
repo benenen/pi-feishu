@@ -11,7 +11,7 @@
 | 普通消息投递 | followUp 合并运行，消息没独立卡片 | 延迟队列、同步 reservation、watchdog；[routing-lifecycle.md](routing-lifecycle.md) |
 | 回合来源与话题 | 最近消息全局变量 / 一律 replyTo，串会话或新开话题 | 原文认领、结构化来源、SendTarget；[routing-lifecycle.md](routing-lifecycle.md) |
 | 网关参数与流 | 少形参静默丢目标，增量 append 吞字 | 参数转发与 cumulativeSink；[gateway-sdk.md](gateway-sdk.md) |
-| 风险与审批 | 出错放行 / 外发或 herdr 控制工具漏分类 | fail-closed、三档风险清单；[security.md](security.md) |
+| 风险与审批 | 出错放行 / 外发或 herdr 控制工具漏分类 | fail-closed、四档风险清单；[security.md](security.md) |
 | 卡片点击 | 只依赖 SDK 鉴权，群友能审批 | 操作者、逐卡会话及单会话绑定三层；[security.md](security.md) |
 | herdr 并行与收获 | 发给 pi 排队 / 轮询旧 idle / 抓 TUI 当答案 | 独立 watch、prompt --wait、会话正文；[herdr.md](herdr.md) |
 | 配置与秘密 | JSON 错误静默跳过 / 凭据入库 | 区分缺文件和坏配置；[environment.md](environment.md) |

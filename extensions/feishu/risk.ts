@@ -21,6 +21,19 @@ const STRICT_SAFE_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const EXFIL_TOOLS = new Set(["feishu_send_image"]);
 
 /**
+ * 能**指挥别的 agent 干活**的工具。任何档位都要人点头，与 EXFIL_TOOLS 同理 ——
+ * 它们绕过了本扩展对 bash/write/edit 的全部判定：`herdr_send_prompt` 只是把一句话
+ * 交给某个 claude/codex/pi 面板，那边跑什么、跑在哪里，本模块一个字都看不见。
+ * 默认那句 `return "safe"` 是给只读工具留的，绝不能落到这组上。
+ */
+const HERDR_CONTROL_TOOLS = new Set([
+  "herdr_start_agent",
+  "herdr_send_prompt",
+  "herdr_send_keys",
+  "herdr_stop_agent",
+]);
+
+/**
  * shell-quote 不会把这几类东西报成 operator，必须在原始串上先拒掉 ——
  * 它们都会让 token 流与 shell 实际执行的 argv 脱节：
  *   反引号  —— `whoami` 原样变成一个普通字符串 token
@@ -570,6 +583,71 @@ export function assessRelaxedBashRisk(command: string, extra?: RelaxedPatterns):
   return compile(extra?.deny).some((re) => re.test(command)) ? "risky" : "safe";
 }
 
+/** 工具名里带删除的（扩展/MCP 注册的自定义工具）也算删除类 */
+const DELETE_TOOL_NAME = /delete|remove|unlink/i;
+
+/**
+ * 「只批删除」档 —— `auto-except-delete`。
+ *
+ * 与 balanced/strict 的白名单相反，而且比 relaxed 还窄：黑名单里只有一类，
+ * **删除文件**。其余一律放行 —— 包括 balanced/relaxed 都要人点头的那些：
+ * `EXFIL_TOOLS`（往外送文件）、`HERDR_CONTROL_TOOLS`（指挥别的 agent 干活）、
+ * write/edit 的仓库边界，以及 relaxed 自己列的那串破坏性命令
+ * （sudo / chmod / git push / 写系统目录 ……）。
+ *
+ * 这是用闸门换省事的一档：判定是黑名单，漏网是它的固有代价，只适合
+ * 「agent 与本机环境完全可信、只想拦住不可逆删除」的场景。
+ */
+const DELETE_HEADS = new Set(["rm", "rmdir", "shred", "unlink", "truncate"]);
+
+/**
+ * 原始串兜底。解析放弃（变量展开、glob、重定向）时看不到 argv，只能在文本上认；
+ * 这会把 `grep rm notes.txt` 也算成删除 —— 多弹一次卡片，方向是安全的。
+ */
+const DELETE_IN_RAW = /\b(rm|rmdir|shred|unlink|truncate)\b/;
+
+/**
+ * 包装器命令：真正的删除藏在它们后面（`xargs rm`、`sudo rm`、`sh -c 'rm -rf x'`）。
+ * 只看命令名会整个漏掉，所以对它们额外扫一遍原始参数。
+ */
+const WRAPPER_HEADS = new Set([
+  "xargs", "env", "sudo", "doas", "nice", "nohup", "time", "timeout", "command", "exec",
+  "sh", "bash", "zsh", "dash", "ksh", "fish",
+]);
+
+/** 这一段命令是不是在删文件 */
+function isDeleteSegment(seg: ShellSegment): boolean {
+  const argv = seg.argv;
+  // 按 basename 取命令名：`/bin/rm` 骗不过去
+  const head = path.basename(argv[0] ?? "").toLowerCase();
+  if (DELETE_HEADS.has(head)) return true;
+  if (WRAPPER_HEADS.has(head) && DELETE_IN_RAW.test(argv.slice(1).join(" "))) return true;
+  // git rm 删的是工作区文件；rsync --delete 删的是对端文件
+  if (head === "git" && argv[1] === "rm") return true;
+  if (head === "rsync" && argv.slice(1).some((a) => a.startsWith("--delete"))) return true;
+  if (head === "find") {
+    if (argv.includes("-delete")) return true;
+    // -exec rm … / -execdir /bin/rm …
+    for (let i = 1; i < argv.length; i += 1) {
+      if (!["-exec", "-execdir", "-ok", "-okdir"].includes(argv[i])) continue;
+      const next = argv[i + 1];
+      if (next !== undefined && DELETE_HEADS.has(path.basename(next).toLowerCase())) return true;
+    }
+  }
+  return false;
+}
+
+function isDeleteOperation(toolName: string, input: Record<string, unknown>): boolean {
+  if (DELETE_TOOL_NAME.test(toolName)) return true;
+  if (toolName !== "bash") return false;
+  const command = typeof input.command === "string" ? input.command : undefined;
+  // 拿不到命令就不敢说它安全 —— fail-closed，与其他档位一致
+  if (command === undefined) return true;
+  const segments = parseShell(command);
+  if (segments === undefined) return DELETE_IN_RAW.test(command);
+  return segments.some(isDeleteSegment);
+}
+
 export interface AssessArgs {
   toolName: string;
   input: Record<string, unknown>;
@@ -590,6 +668,12 @@ export function assessRisk({
   denyPatterns,
   allowPatterns,
 }: AssessArgs): Risk {
+  // 排在 strict / EXFIL / HERDR 之前：这一档的语义就是「除删除外全放行」，
+  // 那几道硬闸门（外发、herdr 控制工具）在这一档刻意不参与判定
+  if (mode === "auto-except-delete") {
+    return isDeleteOperation(toolName, input) ? "risky" : "safe";
+  }
+
   if (mode === "strict") {
     // 安全清单而非危险清单：扩展和 MCP 服务器能注册任意名字的工具，
     // 它们照样会写文件、起子进程。枚举危险名字必然漏，
@@ -598,6 +682,7 @@ export function assessRisk({
   }
 
   if (EXFIL_TOOLS.has(toolName)) return "risky";
+  if (HERDR_CONTROL_TOOLS.has(toolName)) return "risky";
 
   if (WRITER_TOOLS.has(toolName)) {
     const target = typeof input.path === "string" ? input.path : undefined;

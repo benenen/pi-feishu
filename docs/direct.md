@@ -238,6 +238,7 @@ pi 把直接投递的排队消息（`followUp` / `steer`）并进**同一个** a
 | `strict` | 除 read/grep/find/ls 外一律要批 | 完全不信任的环境 |
 | `balanced`（默认） | **白名单**：命令名 + 标志都在只读表里才放行 | 日常 |
 | `relaxed` | **黑名单**：只拦明确破坏性的命令 | 信任 agent 与仓库环境时 |
+| `auto-except-delete` | **黑名单，只拦删除文件**；其余全放行（含外发与 herdr 控制工具） | 只想拦住不可逆的删除时 |
 
 `balanced` 和 `relaxed` 都基于 `shell-quote` 的**结构化解析**，不是在原始串上扫正则 ——
 所以 `grep rm notes.txt` 不会因为出现 `rm` 被拦，`2>/dev/null` 不会被当成写 `/dev`。

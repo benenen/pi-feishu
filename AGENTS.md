@@ -30,7 +30,7 @@
 - pi 能否接新 prompt 用 `isAgentActive`，运行直到 `agent_settled`；`isStreaming` 只管理飞书流。普通消息独立 run / 卡片，先 reservation 再投递。
 - 入站来源按 `before_agent_start.prompt` 原文认领，不用“最近消息”；自主通知按 `customType` + `details.session` 认领。已有来源优先，无来源回合推迟建卡。
 - 出站用 `SendTarget`；只有入站 `threadId` 存在才回话题。SDK 流通过 `cumulativeSink` 传累计全文。
-- 安全闸门 fail-closed；外发与 herdr 控制工具三个档位都 risky。卡片点击自行执行三层鉴权。
+- 安全闸门 fail-closed；外发与 herdr 控制工具除 `auto-except-delete` 外三档都 risky。卡片点击自行执行三层鉴权。
 - `/herdr` 只对审批名单生效，在入站本地处理、独立 watch；停网关时 shutdown。派活使用 `prompt --wait` 活动门，优先从会话文件抽答案。
 
 ## 按改动范围必读
@@ -75,7 +75,7 @@
 - [日志、网关与 SDK 契约](docs/agents-dot-md/gateway-sdk.md) — TUI 日志保护、出站异常兜底、参数转发与累计流式输出。
 - [herdr 派活与结果回收](docs/agents-dot-md/herdr.md) — 独立后台 watch、真实活动门、会话文件收获与关闭清理。
 - [消息路由与回合生命周期](docs/agents-dot-md/routing-lifecycle.md) — 普通消息延迟、投递占位、来源认领、自主回合与话题路由的硬性契约。
-- [安全与审批](docs/agents-dot-md/security.md) — 风险三档、外发准入、herdr 控制工具及卡片点击鉴权。
+- [安全与审批](docs/agents-dot-md/security.md) — 风险四档、外发准入、herdr 控制工具及卡片点击鉴权。
 - [技术栈与实现约定](docs/agents-dot-md/tech-stack.md) — Node 原生类型剥离、TypeScript ESM、依赖与验证命令。
 - [测试与实机验证](docs/agents-dot-md/testing.md) — TDD、手写替身、真 SDK 契约测试、herdr 隔离验收及 pi 重启要求。
 - [语言约定](docs/agents-dot-md/translation.md) — 交流、测试名称及代码注释沿用本仓库的中文风格。

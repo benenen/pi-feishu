@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export type ApprovalMode = "balanced" | "strict" | "relaxed";
+export type ApprovalMode = "balanced" | "strict" | "relaxed" | "auto-except-delete";
 
 /**
  * open：所有人都能私聊和群聊里触达机器人
@@ -216,11 +216,12 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
     if (
       merged.approvalMode === "balanced" ||
       merged.approvalMode === "strict" ||
-      merged.approvalMode === "relaxed"
+      merged.approvalMode === "relaxed" ||
+      merged.approvalMode === "auto-except-delete"
     ) {
       approvalMode = merged.approvalMode;
     } else {
-      problems.push('approvalMode 必须是 "balanced"、"strict" 或 "relaxed"');
+      problems.push('approvalMode 必须是 "balanced"、"strict"、"relaxed" 或 "auto-except-delete"');
     }
   }
 

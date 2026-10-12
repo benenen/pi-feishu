@@ -185,6 +185,11 @@ test("approvalMode 接受 relaxed", () => {
   assert.equal(c.approvalMode, "relaxed");
 });
 
+test("approvalMode 接受 auto-except-delete", () => {
+  const c = loadConfig({ files: [{ ...base, approvalMode: "auto-except-delete" }], env: {}, cwd: "/w" });
+  assert.equal(c.approvalMode, "auto-except-delete");
+});
+
 test("approvalMode 仍然拒绝乱填的值", () => {
   const e = throwsConfigError(() =>
     loadConfig({ files: [{ ...base, approvalMode: "yolo" }], env: {}, cwd: "/w" }),

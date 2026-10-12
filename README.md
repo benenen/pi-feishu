@@ -67,7 +67,7 @@ pi install git:github.com/you/pi-feishu
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `approvalMode` | `"balanced"` | `strict` 除 read/grep/find/ls 外全批；`balanced` 只放行只读命令白名单；`relaxed` 只拦黑名单。详见「审批档位」 |
+| `approvalMode` | `"balanced"` | `strict` 除 read/grep/find/ls 外全批；`balanced` 只放行只读命令白名单；`relaxed` 只拦黑名单；`auto-except-delete` 只拦删除文件。详见「审批档位」 |
 | `approverAllowlist` | 同 `dmAllowlist` | **谁点卡片的「允许」算数**。飞书 SDK 不对卡片回调做白名单过滤，**任何档位下解析后都不能为空** —— `dmMode: open` 时它是唯一挡住「谁都能批准自己」的东西 |
 | `denyPatterns` | `[]` | **仅 relaxed 档**：追加到内置黑名单之上的正则（字符串形式，JSON 里反斜杠写两遍）|
 | `allowPatterns` | `[]` | **仅 relaxed 档**：例外，命中即放行，**优先于所有 deny（含内置）** |
@@ -93,6 +93,14 @@ pi install git:github.com/you/pi-feishu
 | `strict` | 除 read/grep/find/ls 外一律要批 | 完全不信任的环境 |
 | `balanced`（默认） | **白名单**：命令名 + 标志都在只读表里才放行 | 日常 |
 | `relaxed` | **黑名单**：只拦明确破坏性的命令 | 你信任 agent 与仓库环境时 |
+| `auto-except-delete` | **黑名单，只拦删除文件**：`rm`/`rmdir`/`shred`/`unlink`/`truncate`/`find -delete`/`git rm`/`rsync --delete` 仍要批，其余全放行 | 只想拦住不可逆的删除时 |
+
+`auto-except-delete` 比 `relaxed` 还宽一档：它连 `relaxed` 都拦的那批也放行
+（`sudo` / `chmod` / `git push` / `curl | sh` / 往仓库外写文件），**也放行
+`feishu_send_image` 与 herdr 控制工具** —— 这两组在其余三档都要人点头。
+它同样基于结构化解析，判不出 argv 时（glob、`$` 展开、拿不到命令）退回在原始串上扫
+`rm|rmdir|shred|unlink|truncate`，宁可多弹一次卡片。
+黑名单必然有漏网（`shred` 之外的覆写工具、自定义 MCP 删除工具），这是它的代价。
 
 `balanced` 支持管道与 `&&` / `||` / `;` 串联 —— 每一段都必须自己过白名单，
 所以 `grep -rn foo . | head -20` 放行，而 `ls | sh` 照样死在 `sh` 上。
@@ -234,7 +242,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 1. **目录白名单** —— 只能发仓库根内、或 `imageDirs` 列出的目录下的文件，**软链按 realpath 判定**，
    白名单目录里放个指向 `/etc` 的软链也带不出去
 2. **文件头识别** —— 按魔数认 png / jpeg / gif / bmp / webp，把 `/etc/shadow` 改名成 `.png` 不好使
-3. **人工审批** —— 工具名在 `risk.ts` 的 `EXFIL_TOOLS` 里，**任何审批档位都要人点头**，
+3. **人工审批** —— 工具名在 `risk.ts` 的 `EXFIL_TOOLS` 里，**除 `auto-except-delete` 外任何审批档位都要人点头**，
    包括 `relaxed`（`allowPatterns` 只对 bash 生效，放不开它）
 
 写文件、跑命令坏在「改坏了本地」，发图坏在「发出去就收不回来」—— 所以这条通道没有「默认放行」档。

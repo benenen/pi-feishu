@@ -38,7 +38,7 @@ pi 事件 (agent_start / message_update / tool_execution_*) ──►│
 | `origin-registry.ts` | 消息级来源登记表：`messageId → chatId`，按原文认领回合来源，工具调用绑消息 |
 | `agent-origin.ts` | 子 agent 来源登记表：`session 名 → 派活那个对话`。pi-asd watcher 推起来的自主回合靠它路由，详见对应专题模块 |
 | `image.ts` | 发图的准入判定：目录白名单（按 realpath）+ 魔数识别。纯函数，不碰文件系统 |
-| `risk.ts` | 安全判定。三档模型，详详见对应专题模块 |
+| `risk.ts` | 安全判定。四档模型，详见对应专题模块 |
 | `approval.ts` | 多通道审批竞速（飞书卡片 vs 终端对话框），先到先得 |
 | `approval-card.ts` | 卡片构造/解析 + 未决审批登记表 |
 | `turn-stream.ts` | 推拉流适配器。Bridge 往里 push，SDK 的 stream 回调从里 pull |
