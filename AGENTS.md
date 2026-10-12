@@ -85,5 +85,5 @@
 
 ## 🧠 记忆索引（docs/memory/，脚本生成）
 <!-- MEMORY:START -->
-- （暂无记忆条目，排查后按 AGENTS.md《记忆记录》的约定追加）
+- [已知坑与判定边界](docs/memory/known-pitfalls.md) — 风险判定、审批档位与放行策略上踩过的坑与容易误判的边界。
 <!-- MEMORY:END -->
