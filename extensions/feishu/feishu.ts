@@ -16,6 +16,8 @@ import {
   handleCardAction,
   resolveSendTarget,
   resolveTarget,
+  type CardActionLike,
+  type CardSettlement,
 } from "./approval-card.ts";
 
 export type { InboundMessage } from "./types.ts";
@@ -37,6 +39,11 @@ export class FeishuGateway implements GatewayLike {
   #bound: string | undefined;
   #messageHandler: ((msg: InboundMessage) => void) | undefined;
   #approvals = new ApprovalRegistry();
+  /**
+   * 审批之外的卡片点击处理器（herdr 选 agent 等）。审批先跑，认领了就不往下走 ——
+   * 两种卡片的 value 里都有 `kind`，解析器各自只认自己那一个，不会互相抢。
+   */
+  #cardHandlers: ((event: CardActionLike) => CardSettlement | undefined)[] = [];
   #chatNames = new ChatNameCache(
     async (chatId) => this.#channel?.getChatInfo(chatId),
     (msg, level) => this.#log(msg, level),
@@ -65,6 +72,11 @@ export class FeishuGateway implements GatewayLike {
 
   onMessage(handler: (msg: InboundMessage) => void): void {
     this.#messageHandler = handler;
+  }
+
+  /** 注册审批之外的卡片点击处理器。鉴权由各处理器自己负责 */
+  onCardAction(handler: (event: CardActionLike) => CardSettlement | undefined): void {
+    this.#cardHandlers.push(handler);
   }
 
   async connect(): Promise<void> {
@@ -116,7 +128,24 @@ export class FeishuGateway implements GatewayLike {
         boundChatId: this.#bound,
         log: this.#log,
       });
-      if (settlement) void this.#settleCard(settlement.messageId, settlement.status);
+      if (settlement) {
+        void this.#settleCard(settlement.messageId, settlement.status);
+        return;
+      }
+      for (const handler of this.#cardHandlers) {
+        let extra: CardSettlement | undefined;
+        try {
+          extra = handler(evt);
+        } catch (err) {
+          // 一个处理器抛错不能把整条卡片回调打挂，更不能连累其他处理器
+          this.#log(`卡片点击处理失败：${String(err)}`, "error");
+          continue;
+        }
+        if (extra) {
+          void this.#settleCard(extra.messageId, extra.status);
+          return;
+        }
+      }
     });
 
     channel.on("reject", (evt) => this.#log(`飞书拒收消息：${evt.reason}`, "warning"));
@@ -165,6 +194,15 @@ export class FeishuGateway implements GatewayLike {
     const target = resolveSendTarget(this.#bound, to);
     if (!channel || !target) return;
     await channel.send(target.chatId, { markdown }, threadOpts(target));
+  }
+
+  /** 发一张普通（非审批）卡片，返回它的 messageId。收件方规则与 sendText 一致 */
+  async sendCard(card: object, to?: string | SendTarget): Promise<string | undefined> {
+    const channel = this.#channel;
+    const target = resolveSendTarget(this.#bound, to);
+    if (!channel || !target) return undefined;
+    const res = await channel.send(target.chatId, { card }, threadOpts(target));
+    return res.messageId;
   }
 
   /**

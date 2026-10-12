@@ -52,6 +52,18 @@ export interface Config {
    * 那边放宽的是谁能找机器人说话，这边放宽的是什么文件能离开这台机器。
    */
   imageDirs: string[];
+
+  /**
+   * `/herdr` 派活用的 herdr 二进制。不填就按 `HERDR_BIN` → `PATH` 的顺序找。
+   * 与凭据不同，这个键**可以用环境变量**（HERDR_BIN 是 herdr 自己的约定）。
+   */
+  herdrBin?: string;
+  /** 还没 `/herdr use` 过时，这个对话默认派给哪个 agent。不填就必须先选 */
+  herdrDefaultAgent?: string;
+  /** 一个 herdr 任务最多等多久（毫秒）。到点仍在跑就回报「还在跑」，不无限挂着 */
+  herdrTaskTimeoutMs: number;
+  /** 工具同步等待期限，超过后交给独立 watcher；不是执行超时。 */
+  toolWaitMs: number;
 }
 
 export class ConfigError extends Error {
@@ -259,6 +271,42 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
 
   const repoRoot = path.resolve(typeof merged.repoRoot === "string" ? merged.repoRoot : cwd);
 
+  // herdrBin 允许被环境变量覆盖 —— HERDR_BIN 是 herdr 自己的约定，不是本扩展发明的键；
+  // 显式写进配置的值优先于 PATH 查找（在 config 里只留一个覆盖位）
+  let herdrBin: string | undefined;
+  if (merged.herdrBin !== undefined) {
+    if (typeof merged.herdrBin === "string" && merged.herdrBin.trim() !== "") {
+      herdrBin = merged.herdrBin.trim();
+    } else {
+      problems.push("herdrBin 必须是非空字符串");
+    }
+  } else if (env.HERDR_BIN !== undefined && env.HERDR_BIN !== "") {
+    herdrBin = env.HERDR_BIN;
+  }
+
+  let herdrDefaultAgent: string | undefined;
+  if (merged.herdrDefaultAgent !== undefined) {
+    if (typeof merged.herdrDefaultAgent === "string" && merged.herdrDefaultAgent.trim() !== "") {
+      herdrDefaultAgent = merged.herdrDefaultAgent.trim();
+    } else {
+      problems.push("herdrDefaultAgent 必须是非空字符串");
+    }
+  }
+
+  let herdrTaskTimeoutMs = 3_600_000;
+  if (merged.herdrTaskTimeoutMs !== undefined) {
+    const n = merged.herdrTaskTimeoutMs;
+    if (typeof n === "number" && Number.isInteger(n) && n > 0) herdrTaskTimeoutMs = n;
+    else problems.push("herdrTaskTimeoutMs 必须是正整数（毫秒）");
+  }
+
+  let toolWaitMs = 10_000;
+  if (merged.toolWaitMs !== undefined) {
+    const n = merged.toolWaitMs;
+    if (typeof n === "number" && Number.isSafeInteger(n) && n > 0 && n <= 2_147_483_647) toolWaitMs = n;
+    else problems.push("toolWaitMs 必须是正整数（毫秒），且不超过 2147483647");
+  }
+
   // 相对路径按 cwd 展开：白名单要拿去跟绝对路径比对，留着相对量会比不上
   const imageDirs = (readStringArray(merged.imageDirs, "imageDirs", problems) ?? []).map((d) =>
     path.resolve(cwd, d),
@@ -286,5 +334,9 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
     approvalTimeoutMs,
     repoRoot,
     imageDirs,
+    herdrBin,
+    herdrDefaultAgent,
+    herdrTaskTimeoutMs,
+    toolWaitMs,
   };
 }

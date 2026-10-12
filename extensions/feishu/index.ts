@@ -1,5 +1,5 @@
 import path from "node:path";
-import { randomInt } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ConfigError, loadConfig, readConfigFile, type Config } from "./config.ts";
@@ -21,6 +21,22 @@ import { createPairing, type Pairing } from "./pairing.ts";
 import type { Asker } from "./approval.ts";
 import type { InboundMessage, SendTarget } from "./types.ts";
 import { DispatchWatchdog } from "./dispatch-watchdog.ts";
+import { createHerdrCli, defaultSpawn, resolveHerdrBin } from "../herdr/cli.ts";
+import { HerdrService } from "./herdr-service.ts";
+import { BackgroundTools, hasBackgroundToolPatch, installBackgroundToolHook } from "./background-tools.ts";
+import type { BackgroundResult } from "./background-summary.ts";
+import { BackgroundTaskStatus } from "./background-status.ts";
+import {
+  buildAgentPickerCard,
+  parseHerdrCardAction,
+  parseHerdrCommand,
+  renderAgentList,
+  renderHerdrError,
+  renderHerdrHelp,
+  renderSelected,
+  renderWatchList,
+  type HerdrCommand,
+} from "./herdr-commands.ts";
 
 /**
  * 回执发回消息本来所在的地方：消息在话题里就回进那个话题，否则直接发进会话。
@@ -68,6 +84,14 @@ export default function (pi: ExtensionAPI) {
   let gateway: FeishuGateway | undefined;
   let bridge: Bridge | undefined;
   let config: Config | undefined;
+  /**
+   * herdr 并行派活。与 gateway 同寿命：飞书一停，所有 watch 一起取消 ——
+   * 留着它们会在没有收件方的情况下白等，最后发往一个已断开的连接。
+   */
+  let herdrService: HerdrService | undefined;
+  let backgroundTools: BackgroundTools | undefined;
+  let taskStatus: BackgroundTaskStatus | undefined;
+  let removeBackgroundHook: (() => void) | undefined;
 
   // ExtensionContext 的属性是惰性 getter，存下引用晚点读拿到的仍是当前的 UI；
   // 每个 handler 都带 ctx，这里只在生命周期入口刷新就够了
@@ -176,6 +200,189 @@ export default function (pi: ExtensionAPI) {
     const gw = new FeishuGateway(cfg, log);
     const br = new Bridge(cfg, gw, log);
 
+    // 完成通知与普通入站共用 FIFO / reservation / watchdog，忙时绝不 followUp 并入旧卡片。
+    const summarizeResult = async (result: BackgroundResult): Promise<void> => {
+      if (bridge !== br || gateway !== gw) return;
+      if (!br.enqueueBackgroundResult(`background-summary:${randomUUID()}`, result)) {
+        await gw.sendText("后台任务已结束，但待总结队列已满。请稍后让我总结该任务结果。", result.to)
+          .catch((error: unknown) => log(`后台总结排队失败回执发送失败：${String(error)}`, "warning"));
+        return;
+      }
+      await releaseOneDeferred(br, gw);
+    };
+
+    // ── herdr 并行派活 ─────────────────────────────────────────────
+    //
+    // 与 pi 的 agent 完全解耦：`/herdr` 走本地处理，不交给 pi。若经 pi，
+    // 所有任务都会排进同一个 agent 运行，而「一次 agent_start = 一条飞书流」
+    // 也意味着并行无从谈起。这里每个任务一个独立 watch，完成后只将总结排给 pi。
+    const herdrSvc = new HerdrService({
+      cli: createHerdrCli({
+        bin: cfg.herdrBin ?? resolveHerdrBin(process.env),
+        spawn: defaultSpawn,
+        env: process.env,
+      }),
+      send: (text, to) => gw.sendText(text, to),
+      onComplete: summarizeResult,
+      onChange: () => taskStatus?.refresh(),
+      log,
+      maxWaitMs: cfg.herdrTaskTimeoutMs,
+      defaultAgent: cfg.herdrDefaultAgent,
+    });
+    herdrService = herdrSvc;
+
+    /** 发一段 herdr 相关的话回飞书。失败只记日志，不让一条回执把消息处理打断 */
+    const sendHerdr = async (text: string, to: SendTarget): Promise<void> => {
+      try {
+        await gw.sendText(text, to);
+      } catch (err) {
+        log(`herdr 回复发送失败：${String(err)}`, "warning");
+      }
+    };
+
+    // herdr 选 agent 的卡片点击。鉴权三层，与审批卡片同一套思路，
+    // 因为 `card.action.trigger` 在飞书 SDK 里**不经任何白名单过滤**。
+    gw.onCardAction((evt) => {
+      const action = parseHerdrCardAction(evt.action.value);
+      if (!action) return undefined;
+      if (!cfg.approverAllowlist.includes(evt.operator.openId)) {
+        log(`忽略非授权用户对 herdr 卡片的点击：${evt.operator.openId}`, "warning");
+        return undefined;
+      }
+      if (action.chatId !== evt.chatId) {
+        log(
+          `忽略来自其他会话的 herdr 卡片点击：卡片发往 ${action.chatId}，点击来自 ${evt.chatId}`,
+          "warning",
+        );
+        return undefined;
+      }
+      if (!cfg.multiChat && gw.boundChatId !== evt.chatId) {
+        log(`忽略未绑定会话的 herdr 卡片点击：${evt.chatId}`, "warning");
+        return undefined;
+      }
+      herdrSvc.select(evt.chatId, action.target);
+      return evt.messageId === undefined
+        ? undefined
+        : { messageId: evt.messageId, status: `已选定 ${action.target}` };
+    });
+
+    /**
+     * `/herdr` 命令。**只认授权操作员** —— 这条通道绕过 pi 的审批闸门
+     * 直接指挥别的 agent，让群里任何人可用等于开了一个不用审批的后门。
+     */
+    const handleHerdrCommand = async (cmd: HerdrCommand, msg: InboundMessage): Promise<void> => {
+      const to = replyTargetOf(msg);
+      if (cmd.kind === "help") {
+        await sendHerdr(renderHerdrHelp(), to);
+        return;
+      }
+      if (!cfg.approverAllowlist.includes(msg.senderId)) {
+        log(`非授权用户尝试使用 /herdr：${msg.senderId}`, "warning");
+        await sendHerdr("你没有派活权限：`/herdr` 只对审批人名单里的人开放。", to);
+        return;
+      }
+
+      const dispatch = async (input: {
+        task: string;
+        target?: string;
+        agentKind?: string;
+      }): Promise<void> => {
+        const r = await herdrSvc.dispatch({ chatId: msg.chatId, to, threadId: msg.threadId, ...input });
+        if (!r.ok) await sendHerdr(renderHerdrError("派活失败：", r.error), to);
+      };
+
+      switch (cmd.kind) {
+        case "list": {
+          const r = await herdrSvc.listAgents();
+          if (!r.ok) {
+            await sendHerdr(renderHerdrError("读不到 herdr 的 agent 列表：", r.error), to);
+            return;
+          }
+          const selected = herdrSvc.selected(msg.chatId);
+          let messageId: string | undefined;
+          try {
+            messageId = await gw.sendCard(
+              buildAgentPickerCard(randomUUID(), msg.chatId, r.data, selected),
+              to,
+            );
+          } catch (err) {
+            log(`发选 agent 卡片失败：${String(err)}`, "warning");
+          }
+          // 卡片发不出去（SDK 拒绝/断线）时退回纯文本，列表信息不能丢
+          if (messageId === undefined) await sendHerdr(renderAgentList(r.data, selected), to);
+          return;
+        }
+        case "use":
+          herdrSvc.select(msg.chatId, cmd.target);
+          await sendHerdr(renderSelected(cmd.target), to);
+          return;
+        case "run":
+          await dispatch({ task: cmd.task });
+          return;
+        case "task":
+          await dispatch({ task: cmd.task, target: cmd.target });
+          return;
+        case "new":
+          await dispatch({ task: cmd.task, agentKind: cmd.agentKind });
+          return;
+        case "status":
+          await sendHerdr(renderWatchList(herdrSvc.watching(msg.chatId)), to);
+          return;
+        case "read": {
+          const r = await herdrSvc.read(cmd.target);
+          await sendHerdr(
+            r.ok ? `**${cmd.target} 最近的输出**\n\n${r.data}` : renderHerdrError("读不到：", r.error),
+            to,
+          );
+          return;
+        }
+        case "send": {
+          const r = await herdrSvc.send(cmd.target, cmd.text);
+          await sendHerdr(
+            r.ok ? `已把这句话送给 **${cmd.target}**。` : renderHerdrError("发送失败：", r.error),
+            to,
+          );
+          return;
+        }
+        case "keys": {
+          const r = await herdrSvc.keys(cmd.target, cmd.keys);
+          await sendHerdr(
+            r.ok
+              ? `已向 **${cmd.target}** 发送按键 ${cmd.keys.join(" ")}。`
+              : renderHerdrError("发送按键失败：", r.error),
+            to,
+          );
+          return;
+        }
+        case "stop": {
+          const r = await herdrSvc.stop(cmd.target);
+          await sendHerdr(
+            r.ok ? `已关闭 **${cmd.target}**（pane ${r.data}）。` : renderHerdrError("关闭失败：", r.error),
+            to,
+          );
+          return;
+        }
+        case "watch": {
+          const r = await herdrSvc.watchExisting({ chatId: msg.chatId, to, target: cmd.target, threadId: msg.threadId });
+          if (!r.ok) await sendHerdr(renderHerdrError("挂 watch 失败：", r.error), to);
+          return;
+        }
+        case "cancel": {
+          const cancelled = herdrSvc.cancel(msg.chatId, cmd.id);
+          await sendHerdr(
+            cancelled
+              ? `已停止等待 \`${cmd.id}\`（agent 本身还在 herdr 里跑）。`
+              : `找不到这个对话下编号为 \`${cmd.id}\` 的 watch。`,
+            to,
+          );
+          return;
+        }
+        case "invalid":
+          await sendHerdr(`${cmd.reason}\n\n${renderHerdrHelp()}`, to);
+          return;
+      }
+    };
+
     gw.onMessage((msg) => {
       void (async () => {
         try {
@@ -234,6 +441,14 @@ export default function (pi: ExtensionAPI) {
             return;
           }
 
+          // herdr 派活走本地处理，不进 pi 的 agent —— 并行就靠这个：
+          // 每个任务挂在各自的 herdr agent 上，答案各自回原对话
+          const herdrCmd = parseHerdrCommand(msg.text);
+          if (herdrCmd) {
+            await handleHerdrCommand(herdrCmd, msg);
+            return;
+          }
+
           const content = await br.toPromptContent(msg);
           // 用 isAgentActive 而不是 isStreaming：agent_end 之后 pi 还可能在
           // 自动重试/压缩上下文，那段窗口里不带 deliverAs 直接发会被
@@ -288,10 +503,33 @@ export default function (pi: ExtensionAPI) {
       // 凭据错、网络不通是新用户最常撞的两件事，必须给出本地化提示，
       // 而不是让异常冒到 pi 的通用错误通道里
       notify(`飞书连接失败：${String(err)}`);
+      // 连不上就没有入站消息，也就不会有人派活；把服务引用撤掉，
+      // 否则 /feishu status 说「未运行」而 stop() 却看得到它，状态就对不上了
+      herdrService = undefined;
       return;
     }
     gateway = gw;
     bridge = br;
+    taskStatus = new BackgroundTaskStatus({
+      getUI: () => ctxRef?.mode === "tui" && ctxRef.hasUI ? ctxRef.ui : undefined,
+      read: () => ({ tools: backgroundTools?.watching() ?? [], herdr: herdrService?.watching() ?? [] }),
+    });
+    if (hasBackgroundToolPatch()) {
+      const jobs = new BackgroundTools({ waitMs: cfg.toolWaitMs, onComplete: summarizeResult, log, onChange: () => taskStatus?.refresh() });
+      try {
+        removeBackgroundHook = installBackgroundToolHook(jobs, (id) =>
+          br.origins.targetOfToolCall(id) ?? br.turnSendTarget ??
+          (gw.boundChatId ? { chatId: gw.boundChatId } : undefined),
+          (id) => br.origins.contextOfToolCall(id),
+        );
+        backgroundTools = jobs;
+      } catch (error) {
+        log(`无法启动后台工具 watcher：${String(error)}`, "warning");
+      }
+    } else {
+      log("pi 尚未加载后台工具补丁；请在扩展仓库运行 npm run patch:pi 后重启 pi。当前工具仍同步执行。", "warning");
+    }
+    taskStatus.refresh();
 
     // 按 bindTarget 决定绑谁。绑不上都不是错误 —— 退回等第一条入站消息即可
     const greeting = `pi 会话已就绪（${cwd}），直接发消息即可。`;
@@ -331,10 +569,17 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function stop(notify: (msg: string) => void): Promise<void> {
+    taskStatus?.dispose();
+    taskStatus = undefined;
     const gw = gateway;
     const br = bridge;
+    const svc = herdrService;
     gateway = undefined;
     bridge = undefined;
+    herdrService = undefined;
+    removeBackgroundHook?.();
+    removeBackgroundHook = undefined;
+    backgroundTools = undefined;
     dispatchWatchdog.clearAll();
     if (!gw) {
       notify("飞书桥接未在运行");
@@ -345,6 +590,11 @@ export default function (pi: ExtensionAPI) {
     pairing?.cancel();
     pairing = undefined;
     notify("飞书桥接已停止");
+    // herdr 的 watch 全部取消 —— 留着它们会在没有收件方的情况下白等；
+    // shutdown 已经 abort 掉了正在等的 herdr 子进程，不会一直挂着
+    await svc?.shutdown().catch((err: unknown) =>
+      log(`取消 herdr watch 失败：${String(err)}`, "warning"),
+    );
     // 扣住的消息一条都不会再处理了，必须挨个告知 ——
     // 静默丢掉的话，那几个人会一直等一个永远不来的回复
     for (const stranded of br?.takeAllDeferred() ?? []) {
@@ -453,12 +703,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_start", (event) => {
+    if (event.parentToolCallId && backgroundTools?.targetOf(event.parentToolCallId)) return;
     // ToolExecutionStartEvent 带 args，工具行才能显示具体命令/路径
     const args = (event.args ?? {}) as Record<string, unknown>;
     bridge?.onToolStart(event.toolCallId, event.toolName, args);
   });
 
   pi.on("tool_execution_end", (event) => {
+    if (event.parentToolCallId && backgroundTools?.targetOf(event.parentToolCallId)) return;
     bridge?.onToolEnd(event.toolCallId, event.isError);
     // 派活的这一刻还知道是谁在说话；等 watcher 一两分钟后把结果推回来时就没线索了。
     // 分成两次调用而不是并进 onToolEnd：一个管渲染，一个管路由，别混。
@@ -505,6 +757,10 @@ export default function (pi: ExtensionAPI) {
           return { allow: ok === true, reason: ok === true ? "终端批准" : "终端拒绝" };
         }
       : undefined;
+
+    // 后台父任务的子工具独立审批：不能沿用或修改后来那个回合的整轮授权。
+    const backgroundTarget = event.parentToolCallId ? backgroundTools?.targetOf(event.parentToolCallId) : undefined;
+    if (backgroundTarget) return bridge.gateToolCall(event.toolName, event.input, tuiAsker, event.toolCallId, backgroundTarget);
 
     // 把这次工具调用绑到触发它的那条消息，审批卡片才能弹回原始对话
     bridge.origins.bindToolCall(event.toolCallId, bridge.originMessageId);

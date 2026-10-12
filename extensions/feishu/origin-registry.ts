@@ -8,6 +8,8 @@ export interface MessageOrigin {
   question?: string;
   /** 话题里的消息才有。出站按它决定要不要回进话题 */
   threadId?: string;
+  /** 内部总结回合沿用真实触发消息的目标，不能把生成的 messageId 当 replyTo。 */
+  sendTarget?: SendTarget;
   /** 登记时刻，排查时用 */
   ts: number;
 }
@@ -99,6 +101,12 @@ export class MessageOriginRegistry {
     else this.#unclaimed.set(promptText, [messageId]);
   }
 
+  /** 后台完成通知不是新的飞书消息；显式保存原目标，普通入站仍沿用 targetOf 的规则。 */
+  recordBackground(messageId: string, to: SendTarget, question: string, threadId?: string): void {
+    this.record({ messageId, chatId: to.chatId, senderId: "", text: question, threadId });
+    this.#byMessage.get(messageId)!.sendTarget = { ...to };
+  }
+
   /**
    * 按发给 pi 的原文认领触发这轮的消息。认不到返回 undefined —— 终端敲的字
    * 走的也是这条路，此时必须是「没有来源」，退回「最近那条」会把终端的回合
@@ -121,6 +129,12 @@ export class MessageOriginRegistry {
   chatOf(messageId: string | undefined): string | undefined {
     if (messageId === undefined) return undefined;
     return this.#byMessage.get(messageId)?.chatId;
+  }
+
+  /** 只有扩展登记的后台通知能覆盖新绑定目标；普通入站不能跨单会话绑定。 */
+  backgroundTargetOf(messageId: string | undefined): SendTarget | undefined {
+    const to = messageId === undefined ? undefined : this.#byMessage.get(messageId)?.sendTarget;
+    return to === undefined ? undefined : { ...to };
   }
 
   /** 判定 steer 是否仍在同一条对话流：群里的不同话题不能只靠 chatId 合并。 */
@@ -152,6 +166,7 @@ export class MessageOriginRegistry {
     if (messageId === undefined) return undefined;
     const origin = this.#byMessage.get(messageId);
     if (origin === undefined) return undefined;
+    if (origin.sendTarget !== undefined) return { ...origin.sendTarget };
     return origin.threadId === undefined
       ? { chatId: origin.chatId }
       : { chatId: origin.chatId, replyTo: messageId, inThread: true };
@@ -170,6 +185,13 @@ export class MessageOriginRegistry {
   /** 同 targetOf，按工具调用回查 —— 审批卡片要弹在触发它的那个话题里 */
   targetOfToolCall(toolCallId: string): SendTarget | undefined {
     return this.targetOf(this.#byToolCall.get(toolCallId));
+  }
+
+  /** 在工具启动时复制问题和话题上下文；原运行 settled 后来源表会清理。 */
+  contextOfToolCall(toolCallId: string): { question?: string; threadId?: string } | undefined {
+    const messageId = this.#byToolCall.get(toolCallId);
+    const origin = messageId === undefined ? undefined : this.#byMessage.get(messageId);
+    return origin === undefined ? undefined : { question: origin.question, threadId: origin.threadId };
   }
 
   /** 清掉一条记录及挂在它上面的工具调用绑定 */

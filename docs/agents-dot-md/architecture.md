@@ -44,6 +44,10 @@ pi 事件 (agent_start / message_update / tool_execution_*) ──►│
 | `turn-stream.ts` | 推拉流适配器。Bridge 往里 push，SDK 的 stream 回调从里 pull |
 | `renderer.ts` | 纯函数：pi 事件 → markdown。无状态、无 IO |
 | `config.ts` | 配置合并与校验 |
+| `background-tools.ts` | 通用工具等待期限、独立 watcher、完成通知与取消 |
+| `background-summary.ts` | 后台结果总结的内部资料与提示构造 |
+| `background-status.ts` | 后台执行与 watcher 的 TUI 状态栏、完整列表和刷新生命周期 |
+| `scripts/patch-pi-background.ts` | pi 1.0.2 公共执行点补丁，覆盖核心模块与 CLI bundle |
 | `dispatch-watchdog.ts` | 投递后未启动的超时恢复，防止 reservation 永久占位 |
 | `pairing.ts` | 配对码和绑定状态 |
 | `reaction.ts` | 入站表情回执的去重与生命周期 |
@@ -68,3 +72,5 @@ pi 事件 (agent_start / message_update / tool_execution_*) ──►│
 - `renderer.ts`、`gate.ts`、`image.ts`、`herdr-commands.ts` 保持纯函数，IO 留在网关或编排层。
 - `extensions/herdr/` 的客户端层不依赖 pi 或飞书；只有 `index.ts` 工具入口依赖 pi。
 - 消息投递与回合来源读 [routing-lifecycle.md](routing-lifecycle.md)，SDK 出站读 [gateway-sdk.md](gateway-sdk.md)，安全策略读 [security.md](security.md)，派活读 [herdr.md](herdr.md)。
+
+长工具与核心补丁契约见 [background-tools.md](background-tools.md)。

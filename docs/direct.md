@@ -70,6 +70,7 @@
 | `/feishu pair` | ✗ | 未绑定时重新签发配对码 |
 | `/feishu unbind` | ✓ | 解绑；`bindTarget: "code"` 下会自动签发新码 |
 | `/feishu stop` | ✓ | 停止并解绑 |
+| `/herdr …` | ✓ | 把任务派给 herdr 里的其它 agent（只对 `approverAllowlist` 开放），见下方 |
 
 ## 绑定方式（`bindTarget`）
 
@@ -257,6 +258,52 @@ pi 把直接投递的排队消息（`followUp` / `steer`）并进**同一个** a
 `allowPatterns` 是例外，**优先于所有 deny（包括内置）**，这是给内置规则开口子的办法。
 两者都是正则字符串（JSON 里反斜杠写两遍），写错会在 `/feishu start` 时当场报错。
 
+## 并行派活：`/herdr`
+
+前提：本机装了 [herdr](https://herdr.dev) 并在跑（`herdr status` 看得到 server）。
+
+`/herdr` 把任务派给 herdr 里的**其它 agent**，不经过 pi。流程是「发消息 → 选 agent → 开始执行 →
+加 watch → 结果自己回来」，所以多个任务能挂在不同 agent 上同时跑。
+
+```
+/herdr                    列出 agent（卡片上点选）
+/herdr use <agent>        选定本对话默认派给谁
+/herdr run <任务>         派给选中的 agent（/herdr <任务> 同义）
+/herdr task <agent> <任务> 直接派给指定 agent
+/herdr new <类型> <任务>  新开一个 agent（pi/claude/codex…）并派活
+/herdr status             本对话正在等哪些任务
+/herdr read <agent>       现在读一段输出
+/herdr send <agent> <话>  往它里面补一句话
+/herdr keys <agent> <键…> 送逻辑按键（ctrl+c/esc/enter），卡在选择框上时用
+/herdr watch <agent>      给已经在跑的 agent 补一个 watch
+/herdr cancel <id>        停止等待（不打断 agent）
+/herdr stop <agent>       关掉它的 pane（终止它）
+```
+
+几个行为值得知道：
+
+- **同一个 agent 上只挂一个任务**：它是一块终端面板，两句话同时塞进去会在里面打架。
+  再派会被拒，换一个 agent 或等它完成。不同 agent 之间完全并行。
+- pi agent 的结果优先从它的**会话文件**里抽最后一条 assistant 回复（干净）；
+  claude / codex 这类没有可读会话文件就退回面板输出。
+- `blocked`（agent 在等你回话）会单独提示：先 `/herdr keys <agent> enter`
+  或 `/herdr send <agent> <回答>`；答不了就切到 herdr 面板直接操作。
+- 到 `herdrTaskTimeoutMs` 仍在跑就回报「还在跑」，不谎报完成。
+- watcher 完成后把原始结果交给 pi 总结；pi 忙时排队，空闲后独立开回合，最后将总结发回**触发命令的那个话题**。不会原样外发日志或内部调用编号；显式 `/herdr read` 仍返回当前输出。
+
+### 权限
+
+`/herdr` 是一条**绕过 pi 审批闸门**的通道（派给 claude 的一句话，在里面跑什么
+`approvalMode` 看不见），所以它是单独的一道门：
+
+- 只有 `approverAllowlist` 里的人能派活；其他人发 `/herdr` 只会收到拒绝
+- 卡片点击同样三层鉴权（操作者名单 + 逐卡会话绑定 + 单会话档的绑定校验）
+- pi 侧的 herdr 控制工具（`herdr_send_prompt` / `herdr_start_agent` / `herdr_stop_agent` /
+  `herdr_send_keys`）也单列进 `risk.ts`，除 `auto-except-delete` 外任何档位都要人点头；只读工具 balanced 档免批
+
+> 还没装 herdr？用不到这一节。没 herdr 时 `/herdr` 会明确报「找不到 herdr」，
+> 其余功能不受影响。
+
 ## 多个 pi 会话怎么办
 
 **一个飞书应用只能有一条长连接。** 多个 pi 会话跑同一个 appId 会抢消息 —— 飞书把事件
@@ -283,6 +330,9 @@ pi 把直接投递的排队消息（`followUp` / `steer`）并进**同一个** a
 | `/feishu start` 报「飞书连接失败」 | 凭据错或网络不通 | 核对 appId/appSecret；确认能出网到 `open.feishu.cn` |
 | 配置改了不生效 | 配置在 `start()` 时读一次 | `/feishu stop` + `/feishu start` |
 | 改了配置文件仍然不生效 | 改错了地方 | 路径是 `~/.pi/**agent**/feishu.json`，不是 `~/.pi/feishu.json` |
+| `/herdr` 报「找不到 herdr」 | herdr 不在 PATH，或 `HERDR_BIN`/`herdrBin` 没指对 | `herdr status` 确认能跑；或配上 `herdrBin` 绝对路径 |
+| `/herdr run` 被拒「正忙」 | 该 agent 面板上有人在干活 | 换一个 agent，或等它空下来 |
+| `/herdr` 被拒「没有派活权限」 | `senderId` 不在 `approverAllowlist` | 把该用户的 open_id 加进去后重启桥接 |
 
 ## 冒烟清单
 
@@ -303,5 +353,10 @@ pi 把直接投递的排队消息（`followUp` / `steer`）并进**同一个** a
 - [ ] 开 `multiChat` 后：私聊与群 @ 各自的回合，输出各回各家
 - [ ] 断网再恢复 → 日志出现重连并恢复，后续消息仍可用
 - [ ] `/new` 重置会话 → 桥接断开；`/feishu start` 可重新绑定
+- [ ] `/herdr` 弹 agent 卡片 → 点选 → 卡片变「已选定 …」
+- [ ] `/herdr run <任务>` → 回执带 watch id → 完成后由 pi 总结再发回本对话
+- [ ] 同一 agent 再派 → 被拒；两个不同 agent 同时派 → 各自回结果
+- [ ] `/herdr status` / `/herdr cancel <id>` 行为符合预期
+- [ ] 非审批人发 `/herdr` → 「没有派活权限」
 - [ ] 故意填错 `appSecret` → 报中文的「飞书连接失败：…」而不是 pi 的通用错误
 - [ ] 故意把配置写成非法 JSON → 报「不是合法的 JSON」而不是「缺少 appId」

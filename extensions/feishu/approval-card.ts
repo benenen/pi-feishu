@@ -176,6 +176,8 @@ export class ApprovalRegistry {
 
 /** 卡片点击事件里鉴权用得到的那几个字段。刻意不依赖飞书 SDK 的类型 */
 export interface CardActionLike {
+  /** 被点的卡片消息 id。审批靠 registry 回查，别的卡片（如 herdr 选 agent）直接用这个 */
+  messageId?: string;
   chatId: string;
   operator: { openId: string };
   action: { value: unknown };

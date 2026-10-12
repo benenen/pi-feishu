@@ -16,6 +16,7 @@ import {
 import type { Config } from "./config.ts";
 import { DeferredQueue, shouldDefer, type DeferredMessage } from "./deferred.ts";
 import { MessageOriginRegistry } from "./origin-registry.ts";
+import { buildSummaryPrompt, type BackgroundResult } from "./background-summary.ts";
 import { AgentOriginRegistry, dispatchedSessionOf, noticeSessionOf } from "./agent-origin.ts";
 export { gateInbound, type GateState, type InboundGate } from "./gate.ts";
 import type { InboundMessage } from "./feishu.ts";
@@ -408,6 +409,15 @@ export class Bridge {
     this.#origins.record(msg);
   }
 
+  /** 完成结果只入队，不直接外发；与普通消息共用 settled 后独立成回合的通道。 */
+  enqueueBackgroundResult(messageId: string, result: BackgroundResult): boolean {
+    const text = buildSummaryPrompt(result);
+    if (!this.#deferred.push({ messageId, chatId: result.to.chatId, text })) return false;
+    const question = result.question?.trim() || `后台任务结果总结：${result.name}`;
+    this.#origins.recordBackground(messageId, result.to, question, result.threadId);
+    return true;
+  }
+
   /**
    * `tool_execution_end` 上登记「这次调用把活派给了哪个子 agent」。
    *
@@ -535,8 +545,10 @@ export class Bridge {
    */
   get turnTarget(): string | undefined {
     if (!this.isAgentActive) return undefined;
-    if (!this.#config.multiChat) return this.#gateway.boundChatId;
     const messageId = this.#originMessageId ?? this.#dispatchMessageId;
+    const backgroundTarget = this.#origins.backgroundTargetOf(messageId);
+    if (backgroundTarget !== undefined) return backgroundTarget.chatId;
+    if (!this.#config.multiChat) return this.#gateway.boundChatId;
     return (
       this.#origins.chatOf(messageId) ?? this.#autonomousTarget?.chatId ?? this.#gateway.boundChatId
     );
@@ -760,6 +772,7 @@ export class Bridge {
     input: Record<string, unknown>,
     tuiAsker: Asker | undefined,
     toolCallId?: string,
+    backgroundTarget?: SendTarget,
   ): Promise<{ block: true; reason: string } | undefined> {
     // 判定本身抛错必须按危险处理。这是个 async 函数，未捕获的异常会变成
     // rejected promise 直接跳过 block 契约 —— 结果是危险工具被放行，
@@ -781,11 +794,11 @@ export class Bridge {
     }
     if (risk === "safe") return undefined;
     // 本回合已被整体批准，后续危险调用不再打扰操作员
-    if (this.#turnApproved) return undefined;
+    if (backgroundTarget === undefined && this.#turnApproved) return undefined;
 
     // 审批卡片要弹回**触发这次调用**的那个对话。工具调用绑过消息就按它回查，
     // 否则退回本回合的目标 —— 弹错地方等于让不相干的人看见并批准
-    const askTarget = this.#origins.targetOfToolCall(toolCallId ?? "") ?? this.turnSendTarget;
+    const askTarget = backgroundTarget ?? this.#origins.targetOfToolCall(toolCallId ?? "") ?? this.turnSendTarget;
     const askers: Asker[] = [this.#gateway.askerFor(askTarget)];
     if (tuiAsker) askers.push(tuiAsker);
 
@@ -802,10 +815,10 @@ export class Bridge {
     }
 
     // 只有「批准 + turn」才开启豁免；拒绝带 scope 一律无效
-    if (decision.allow && decision.scope === "turn") this.#turnApproved = true;
+    if (backgroundTarget === undefined && decision.allow && decision.scope === "turn") this.#turnApproved = true;
 
     if (decision.allow) return undefined;
-    this.#push(renderBlocked(toolName, decision.reason));
+    if (backgroundTarget === undefined) this.#push(renderBlocked(toolName, decision.reason));
     return { block: true, reason: decision.reason };
   }
 

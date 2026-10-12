@@ -14,7 +14,8 @@
   },
   "scripts": {
     "test": "node --test \"test/**/*.ts\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "patch:pi": "node scripts/patch-pi-background.ts"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.71.1",

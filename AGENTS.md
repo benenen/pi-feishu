@@ -39,6 +39,7 @@
 - 改投递、延迟队列、来源、pi 事件或话题时读 [路由与生命周期](docs/agents-dot-md/routing-lifecycle.md)。
 - 改网关、日志、renderer 或流式出站时读 [SDK 契约](docs/agents-dot-md/gateway-sdk.md)。
 - 改风险、审批、发图、卡片或 herdr 权限时读 [安全与审批](docs/agents-dot-md/security.md)。
+- 改长工具等待或 pi 核心执行点时读 [后台工具](docs/agents-dot-md/background-tools.md)。
 - 改 herdr spawn / watch / harvest 或服务生命周期时读 [herdr](docs/agents-dot-md/herdr.md)。
 - 写测试或做真实验证时读 [测试要求](docs/agents-dot-md/testing.md)；改配置、连接、绑定时读 [环境配置](docs/agents-dot-md/environment.md)。
 
@@ -69,6 +70,7 @@
 ## 📂 模块文档索引（docs/agents-dot-md/，脚本生成）
 <!-- MODULES:START -->
 - [系统架构](docs/agents-dot-md/architecture.md) — 双向桥接、独立 herdr 通道及模块职责与依赖边界。
+- [通用工具后台等待](docs/agents-dot-md/background-tools.md) — pi 1.0.2 公共执行点补丁、独立 watcher、原目标快照及取消与审批边界。
 - [代码 checklist（强制自检）](docs/agents-dot-md/code-checklist.md) — 写代码前定位专题约束，完成后逐项核对改动与验证证据。
 - [编码与改动规范](docs/agents-dot-md/coding-guidelines.md) — 局部改动、异步边界、纯函数与结构化输入的实现约定。
 - [配置与运行环境](docs/agents-dot-md/environment.md) — 分层配置、凭据优先级、配置错误处理与真实飞书冒烟入口。

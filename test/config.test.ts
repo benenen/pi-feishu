@@ -374,3 +374,57 @@ test("readReceiptEmoji 必须是字符串", () => {
   );
   assert.ok(e.problems.some((p) => p.includes("readReceiptEmoji")));
 });
+
+// ── herdr 派活相关配置 ─────────────────────────────────────────────
+
+test("herdr 配置有默认值：bin 走 HERDR_BIN/PATH，超时一小时，不预设 agent", () => {
+  const cfg = loadConfig({ files: [base], env: {}, cwd: "/work/repo" });
+  assert.equal(cfg.herdrBin, undefined);
+  assert.equal(cfg.herdrDefaultAgent, undefined);
+  assert.equal(cfg.herdrTaskTimeoutMs, 3_600_000);
+});
+
+test("herdrBin / herdrDefaultAgent / herdrTaskTimeoutMs 可配置，HERDR_BIN 环境变量兜底", () => {
+  const cfg = loadConfig({
+    files: [{ ...base, herdrBin: "/opt/herdr", herdrDefaultAgent: "lnny", herdrTaskTimeoutMs: 60_000 }],
+    env: {},
+    cwd: "/work/repo",
+  });
+  assert.equal(cfg.herdrBin, "/opt/herdr");
+  assert.equal(cfg.herdrDefaultAgent, "lnny");
+  assert.equal(cfg.herdrTaskTimeoutMs, 60_000);
+
+  const viaEnv = loadConfig({ files: [base], env: { HERDR_BIN: "/env/herdr" }, cwd: "/work/repo" });
+  assert.equal(viaEnv.herdrBin, "/env/herdr");
+
+  // 配置文件里的显式值优先于环境变量
+  const both = loadConfig({
+    files: [{ ...base, herdrBin: "/cfg/herdr" }],
+    env: { HERDR_BIN: "/env/herdr" },
+    cwd: "/work/repo",
+  });
+  assert.equal(both.herdrBin, "/cfg/herdr");
+});
+
+test("herdr 配置写错时报出来，不静默退回默认", () => {
+  assert.throws(
+    () => loadConfig({ files: [{ ...base, herdrBin: "" }], env: {}, cwd: "/work/repo" }),
+    /herdrBin/,
+  );
+  assert.throws(
+    () => loadConfig({ files: [{ ...base, herdrDefaultAgent: 5 }], env: {}, cwd: "/work/repo" }),
+    /herdrDefaultAgent/,
+  );
+  assert.throws(
+    () => loadConfig({ files: [{ ...base, herdrTaskTimeoutMs: -1 }], env: {}, cwd: "/work/repo" }),
+    /herdrTaskTimeoutMs/,
+  );
+});
+
+test("toolWaitMs 默认 10 秒，可配置为正整数等待期限", () => {
+  assert.equal(loadConfig({ files: [base], env: {}, cwd: "/work" }).toolWaitMs, 10_000);
+  assert.equal(loadConfig({ files: [{ ...base, toolWaitMs: 500 }], env: {}, cwd: "/work" }).toolWaitMs, 500);
+  for (const value of [0, -1, 1.5, "500"]) {
+    assert.throws(() => loadConfig({ files: [{ ...base, toolWaitMs: value }], env: {}, cwd: "/work" }), /toolWaitMs/);
+  }
+});

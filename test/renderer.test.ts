@@ -123,6 +123,8 @@ const CFG: Config = {
   approvalTimeoutMs: 120_000,
   repoRoot: "/work/repo",
   imageDirs: [],
+  herdrTaskTimeoutMs: 3_600_000,
+  toolWaitMs: 10_000,
 };
 
 test("status：未运行时只说未运行，并给出启动方式", () => {

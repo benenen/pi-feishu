@@ -3,6 +3,7 @@
 > AGENTS.md 的细化模块目录（不会被 Claude Code 自动加载，按需查阅）。本文件由 agents-dot-md skill 的 `reindex.py` 生成，勿手工编辑。
 
 - [系统架构](architecture.md) — 双向桥接、独立 herdr 通道及模块职责与依赖边界。
+- [通用工具后台等待](background-tools.md) — pi 1.0.2 公共执行点补丁、独立 watcher、原目标快照及取消与审批边界。
 - [代码 checklist（强制自检）](code-checklist.md) — 写代码前定位专题约束，完成后逐项核对改动与验证证据。
 - [编码与改动规范](coding-guidelines.md) — 局部改动、异步边界、纯函数与结构化输入的实现约定。
 - [配置与运行环境](environment.md) — 分层配置、凭据优先级、配置错误处理与真实飞书冒烟入口。

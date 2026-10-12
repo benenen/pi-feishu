@@ -104,6 +104,8 @@ const CONFIG = {
   approvalTimeoutMs: 1000,
   repoRoot: "/work/repo",
   imageDirs: [],
+  herdrTaskTimeoutMs: 3_600_000,
+  toolWaitMs: 10_000,
 };
 
 test("流式收尾卡住时 endTurn 不会永久挂起，改为补发全文", async () => {
@@ -1441,4 +1443,25 @@ test("推送回合里的审批卡片也弹回派活的那个对话", async () =>
   await bridge.gateToolCall("bash", { command: "rm -rf x" }, undefined);
 
   assert.deepEqual(asks, ["oc_group"], "弹错对话就是让不相干的人替别人批准");
+});
+
+test("后台子工具的审批回原话题，不沿用或改变当前新回合的整轮授权", async () => {
+  const targets: unknown[] = [];
+  const bridge = new Bridge(CONFIG, fakeGateway({
+    askerFor: (target) => async () => {
+      targets.push(target);
+      return { allow: true, reason: "批准", scope: "turn" };
+    },
+  }), () => {});
+  bridge.startTurn();
+  await bridge.gateToolCall("bash", { command: "rm -rf a" }, undefined);
+  assert.equal(bridge.turnApproved, true);
+  const original = { chatId: "原群", replyTo: "原问题", inThread: true };
+  await bridge.gateToolCall("bash", { command: "rm -rf b" }, undefined, "old/1", original);
+  assert.deepEqual(targets.at(-1), original, "新回合整体授权不能替后台旧任务免审批");
+  await bridge.endTurn();
+  bridge.startTurn();
+  await bridge.gateToolCall("bash", { command: "rm -rf c" }, undefined, "old/2", original);
+  assert.equal(bridge.turnApproved, false, "后台卡片的整轮授权不能污染新回合");
+  await bridge.endTurn();
 });

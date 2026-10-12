@@ -31,7 +31,7 @@ pi install git:github.com/you/pi-feishu
 }
 ```
 
-一共 18 个键，按用途分五组。
+配置键按用途分组如下。
 
 ### 凭据
 
@@ -80,9 +80,18 @@ pi install git:github.com/you/pi-feishu
 
 | 键 | 默认 | 说明 |
 |---|---|---|
+| `toolWaitMs` | `10000` | 工具同步等待期限（毫秒），超过后交给独立 watcher，完成后由 agent 总结再回原飞书会话；不是执行超时，需 pi 核心补丁 |
 | `autoStart` | `false` | 会话启动时自动连接。**多开 pi 会抢消息** —— 同一个 appId 只有一条长连接，飞书把事件推给哪一条不确定，保持 `false` 更安全 |
 | `repoRoot` | 当前 cwd | 判定「写到范围外」的基准，也是 `feishu_send_image` 默认允许的发图范围 |
 | `imageDirs` | `[]` | 除仓库根外，还允许 `feishu_send_image` 发图的目录。相对路径按 cwd 展开。**空数组是「只允许仓库内」，不是「不限」** —— 与 `groupAllowlist` 相反，那边放宽的是谁能找机器人说话，这边放宽的是什么文件能离开这台机器 |
+
+### herdr 并行派活
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `herdrBin` | `HERDR_BIN` → `PATH` | `/herdr` 用的 herdr 二进制。不填就按环境变量 → `PATH` 找 |
+| `herdrDefaultAgent` | 无 | 还没 `/herdr use` 过时，本对话默认派给哪个 agent。不填时从已有空闲 agent 中按任务相关性选择；没有可用目标就报错，不自动新建 |
+| `herdrTaskTimeoutMs` | `3600000` | 单个任务最多等多久（毫秒）。到点仍在跑就回报「还在跑」，不无限挂着 |
 
 > direct 模式的完整操作手册见 [`docs/direct.md`](docs/direct.md)：上手、命令、绑定方式、排障、冒烟清单。
 
@@ -249,6 +258,110 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 飞书单图上限 10MB。
 
+## 长工具转后台
+
+支持 pi **1.0.2**。在扩展仓库安装依赖后，应用公共工具执行点补丁：
+
+```bash
+npm install
+npm run patch:pi
+npm run patch:pi -- --check
+```
+
+脚本会同时检查本地依赖及 PATH 中的 pi 安装，修改核心模块和真实 CLI bundle，
+保留 `.pi-feishu-background.bak` 备份；可以用 `npm run patch:pi -- --restore` 回滚。
+其他版本会明确拒绝修改。升级或重新安装 pi 后须重新应用补丁。
+**应用补丁后重启 pi**，再启动飞书桥接；仅 `/feishu stop` + `start` 不会加载新代码。
+未加载补丁时会明确提示，工具继续按原来的同步方式执行。
+
+bash、herdr、MCP 和其他扩展工具共用这条链路：工具先经过原有参数校验和审批，
+在 `toolWaitMs` 内完成就返回原结果；超过期限则立即给模型后台登记回执，释放当前运行。
+独立 watcher 继续等实际执行，完成或失败后把结果交给 pi **另开回合总结**。pi 正忙时，
+总结任务与普通消息一起排队，等 `agent_settled` 后启动；不会并入正在运行的旧卡片。
+总结卡片抬头显示对应的原始问题，正文先点明这条请求，再给结论、关键事实和来源链接，并如实说明失败或未完成情况，
+发回调用时的原飞书对话/话题。用户不会收到原始日志、JSON 或 `call_...` 内部编号。
+不要重复提交或轮询同一个后台任务；依赖结果的步骤需要等总结消息后再继续。
+
+总结复用当前 pi 的模型配置。原始结果作为内部资料，文本或结构化 JSON 都可提供；
+超过 24000 个字符时保留头尾并注明中间被截断，不把资料原样发给用户。
+无飞书目标的工具继续同步执行。最多同时执行 16 个被管理的工具；停止桥接时发出取消信号，
+晚到结果不再发送。第三方工具如果忽略取消信号，其实际工作可能仍在继续。
+
+### 终端后台任务状态
+
+TUI 状态栏显示 `background N [名称…] · watcher M [名称…]`。
+输入框下方展示完整 Background / Watcher 列表，包含工具或 herdr 目标名、任务说明、
+已运行时间与「等待工具完成／等待 agent 落地／提交总结」阶段。
+
+短工具在同步等待阶段不会冒充后台任务；达到等待期限转后台后才入列表。
+状态变化即时刷新，活动期间耗时每秒更新；完成、取消、停止桥接或切换会话时移除列表并清理刷新定时器。
+这项显示通过 `setStatus` 和 `belowEditor` widget 接入，兼容已有 footer（包括 pi-usage）；
+完整列表不受 footer 单行截断影响。headless / RPC 模式不启动终端状态刷新。
+
+## 用 `/herdr` 并行派活
+
+把活派给 [herdr](https://herdr.dev) 里的**其它 agent**（pi / claude / codex …），
+自己这边的 pi 该干嘛干嘛。每个任务挂在各自的 agent 面板上，**完成时间互不影响** ——
+这就是并行：三个 agent 同时做三件事，谁先做完谁先回。
+
+```
+/herdr                     列出所有 agent（卡片上直接点选）
+/herdr use lnny            选定本对话默认派给谁
+/herdr run 修一下登录页     派给选中的 agent（/herdr <任务> 同义）
+/herdr task zgy 写测试      直接派给指定 agent，不改默认选择
+/herdr new claude 审一下diff 新开一个 claude agent 并派活
+/herdr status              本对话正在等哪些任务
+/herdr read lnny           现在读一段它的输出
+/herdr send lnny 继续      往它里面补一句话
+/herdr keys lnny esc       送逻辑按键（ctrl+c / esc / enter），卡在选择框上时用
+/herdr watch lnny          给一个已经在跑的 agent 补一个 watch
+/herdr cancel ab12cd34     停止等待（不打断 agent 本身）
+/herdr stop lnny           关掉它的 pane（终止它）
+/herdr help                命令速查
+```
+
+默认复用现有 agent，只有用户明确要求新建（例如 `/herdr new`）才创建。新建工具的 `cwd`
+使用用户指定的目录，未指定时使用用户主目录 `~`，不继承当前仓库。
+
+模型调用 herdr 工具时，`target` 必须复制 `herdr_list_agents` 输出中的值。没有注册名字的 agent 用 pane id（如 `w2:p3`）；工作区标签、目录名和终端标题不能作为 target。
+
+流程就是「发消息 → 选 agent → 开始执行 → 加 watch → 结果自己回来」：
+
+1. `/herdr`（或 `/herdr list`）弹一张卡片，点一个 agent 选定
+2. `/herdr run <任务>` 派活，立刻回一条回执（带 watch 编号）
+3. 后台 watch 等它落地（`idle` / `done` / `blocked`）
+4. 落地后交给 pi 独立总结，再把**总结**发回这个对话
+
+pi agent 的结果优先从它的会话文件里抽**最后一条 assistant 回复**（干净），
+claude / codex 这类没有会话文件可读的就退回面板输出。`blocked`（在等你回话）
+会单独提示：可以先 `/herdr keys <agent> enter` 或 `/herdr send <agent> <回答>`，
+答不了就切到 herdr 面板直接操作。
+
+几条刻意的设计：
+
+- **同一个 agent 上只挂一个任务**：它是一块终端面板，两句话同时塞进去会在里面打架。
+  再派会被拒，换一个 agent 或等它完成。不同 agent 之间完全并行。
+- **派活不经过 pi**：走本地处理直接指挥 herdr。若经 pi，所有任务会排进同一个 agent
+  运行，「一次 `agent_start` = 一条飞书流」也意味着并行无从谈起。
+- **到点仍在跑就回报「还在跑」**，不谎报完成，也不无限挂着。
+- 结果发回**触发这条命令的那个话题**（与正常回复同一套话题规则）。
+
+### 权限：`/herdr` 只对审批人开放
+
+这条通道**绕过 pi 的审批闸门** —— 派给 claude agent 的一句话，在里面跑什么、
+跑在哪里，`approvalMode` 一个字都看不见。所以它是单独的一条门：
+
+- 只有 `approverAllowlist` 里的人能派活，其他人发 `/herdr` 只会收到拒绝
+- 卡片点击同样三层鉴权（操作者名单 + 逐卡会话绑定 + 单会话档的绑定会话校验），
+  `card.action.trigger` 在飞书 SDK 里**没有任何白名单过滤**，不自己判就是群友随便点
+
+另外 pi 侧的 herdr 工具（`herdr_send_prompt` / `herdr_start_agent` / `herdr_stop_agent` /
+`herdr_send_keys`）也单列进 `risk.ts`，**除 `auto-except-delete` 外任何审批档位都要人点头**，与 `feishu_send_image` 同理。
+只读的 `herdr_list_agents` / `herdr_read_agent` 在 balanced 档免批。
+
+> 还没装 herdr？用不到这一节。没有 herdr 时 `/herdr` 会明确报「找不到 herdr」，
+> 其余功能完全不受影响。
+
 ## 开发
 
 ```bash
@@ -279,6 +392,13 @@ Node ≥ 24（依赖原生 TypeScript 类型剥离，无构建步骤）。
   - [ ] 不点，等超时 → 命令被拦，理由含「超时」
   - [ ] 在 TUI 里确认 → 飞书卡片变「已在终端处理」
 - [ ] 安全命令（`ls`、`git status`）在 balanced 下**不**弹审批
+- [ ] `/herdr` 弹 agent 卡片，点一个 → 卡片变「已选定 …」；非审批人点 → 无反应
+- [ ] `/herdr run <任务>` → 回执带 watch 编号 → 任务完成后结果发回本对话
+- [ ] 同一个 agent 上再 `/herdr run` → 被拒（提示已在等）
+- [ ] 两个不同 agent 上各派一个 → 两边各自回结果，互不等待
+- [ ] `/herdr status` 列出在等的任务；`/herdr cancel <id>` 之后不再回结果
+- [ ] herdr 里给 agent 回一句「需要确认」类的话（blocked）→ 飞书收到「在等你回复」提示
+- [ ] 非审批人发 `/herdr` → 收到「没有派活权限」
 - [ ] 非白名单账号发消息 → 无响应
 - [ ] 绑定后换个会话发消息 → 收到「已绑定到其他对话」
 - [ ] 断开网络再恢复 → 日志出现重连并恢复，后续消息仍可用
