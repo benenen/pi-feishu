@@ -49,6 +49,7 @@ pi install git:github.com/you/pi-feishu
 | `groupAllowlist` | `[]` | 允许的群 chat_id（`oc_` 开头）。**空数组表示「不限」，不是「全部禁止」** |
 | `readReceiptEmoji` | `"GLANCE"` | 开始处理一条消息时给它加的表情回应，充当「已读/在处理」信号。取值是**飞书的具名表情 key**（不是 Unicode 表情）；置空字符串关闭 |
 | `multiChat` | `false` | **仅 direct 档**：一个 pi 会话同时服务多个对话（私聊 + 群 @），回复回到消息来源。开启后不再做会话级绑定过滤，谁能触达完全由 `dmMode` / 白名单 / `requireMention` 决定 |
+| `syncInteractiveTurns` | `true` | 是否把 Pi 终端发起的回合、工具进度与审批同步到飞书。设为 `false` 后，仅飞书入站消息及其回合继续回飞书；Pi 终端回合只留在终端，并完全跳过本扩展审批，只服从 Pi/Harness 原生策略 |
 | `requireMention` | `true` | 群里是否必须 @ 机器人。**群里拉了多个 bot 时必须保持 `true`** —— 设成 `false` 等于不看 @，每条群消息会同时喂给群里所有 bot，多个 agent 一起干活、一起刷屏。只对群生效，私聊不受影响 |
 
 `dmMode` 为 `allowlist` 时，`dmAllowlist` 和 `groupAllowlist` 不能同时为空。

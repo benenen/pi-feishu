@@ -181,6 +181,7 @@ export function renderStatus(info: StatusInfo): string {
     "飞书桥接：运行中",
     `· 应用：${c.appId}`,
     `· 传输：${transport}`,
+    `· 终端回合同步：${c.syncInteractiveTurns ? "开启" : "关闭"}`,
     `· 绑定会话：${bound}`,
     `· 当前：${turn}${exempt}`,
     `· 私聊：${dm}`,

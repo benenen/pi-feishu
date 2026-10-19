@@ -24,6 +24,7 @@ test("最小可用配置带出全部默认值", () => {
   assert.equal(c.appId, "cli_x");
   assert.equal(c.appSecret, "sec");
   assert.equal(c.autoStart, false);
+  assert.equal(c.syncInteractiveTurns, true);
   assert.equal(c.requireMention, true);
   assert.equal(c.approvalMode, "balanced");
   assert.equal(c.approvalTimeoutMs, 120_000);
@@ -49,6 +50,18 @@ test("imageDirs 不是字符串数组时报错，而不是悄悄退回空数组"
     err.problems.some((p) => p.includes("imageDirs")),
     `问题列表里没提到 imageDirs：${err.problems.join(" / ")}`,
   );
+});
+
+test("syncInteractiveTurns 可关闭终端发起回合的飞书同步，且必须是布尔值", () => {
+  assert.equal(
+    loadConfig({ files: [{ ...base, syncInteractiveTurns: false }], env: {}, cwd: "/work" })
+      .syncInteractiveTurns,
+    false,
+  );
+  const err = throwsConfigError(() =>
+    loadConfig({ files: [{ ...base, syncInteractiveTurns: "false" }], env: {}, cwd: "/work" }),
+  );
+  assert.ok(err.problems.some((p) => p.includes("syncInteractiveTurns")));
 });
 
 test("环境变量优先于配置文件", () => {

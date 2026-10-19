@@ -262,6 +262,8 @@ export class Bridge {
   #originMessageId: string | undefined;
   /** 纯图片消息的飞书原文为空时，退回实际投给 agent 的 prompt 作为卡片标题 */
   #originPrompt: string | undefined;
+  /** 当前回合是否允许同步飞书；关闭终端同步时，无飞书来源的交互回合为 false。 */
+  #turnSyncEnabled = true;
 
   /**
    * `pi.sendUserMessage()` 是 fire-and-forget 的 void API。从调用它到
@@ -301,6 +303,11 @@ export class Bridge {
   /** 飞书流是否开着：`agent_start` → `agent_end`。只管渲染，别拿它判断 pi 忙不忙 */
   get isStreaming(): boolean {
     return this.#turn !== undefined;
+  }
+
+  /** 当前回合是否应把正文、工具进度和审批同步到飞书。 */
+  get syncCurrentTurn(): boolean {
+    return this.#turnSyncEnabled;
   }
 
   /** 操作员是否点过「本回合全部允许」，供 /feishu status 展示 */
@@ -444,6 +451,7 @@ export class Bridge {
     if (session === undefined) return;
     // 查不到就保持 undefined，退回默认收件方 —— 没线索时不许猜
     this.#agentTarget = this.#agentOrigins.targetOf(session);
+    if (this.#agentTarget !== undefined) this.#turnSyncEnabled = true;
   }
 
   /** 登记会开新 run 的 prompt；并入当前 run 的 steer 没有 before_agent_start，不能留索引 */
@@ -610,6 +618,7 @@ export class Bridge {
     }
     if (reservedMessageId !== undefined) this.#origins.forget(reservedMessageId);
     this.#originPrompt = undefined;
+    this.#turnSyncEnabled = true;
     // 和 #originMessageId 同寿命：漏清的话，下一个认领不到来源的回合（终端敲的字）
     // 会被上一条 agent 推送的目标带走。登记表本身不清 —— 那个 session 还活着，
     // 下一次推送还要按它回查。
@@ -649,6 +658,7 @@ export class Bridge {
     // 它跟的是 pi 的运行，不是飞书流
     const dispatchedMessageId = this.#dispatchMessageId;
     this.#agentActive = true;
+    this.#turnSyncEnabled = this.#config.syncInteractiveTurns || this.#originMessageId !== undefined;
     this.#dispatchReserved = false;
     this.#dispatchMessageId = undefined;
     this.#dispatchAccepted = false;
@@ -679,7 +689,7 @@ export class Bridge {
     // 这时**不能**急着建卡：pi 的 agent loop 是先发 agent_start、再发输入消息的
     // message_start，而「这是哪个子 agent 的推送」正是从后者认出来的。在这里定死
     // 目标，推送就永远只能落进默认收件方。反正也没内容可发，等有话说了再建。
-    if (heading !== "") this.#startStreaming(turn);
+    if (this.#turnSyncEnabled && heading !== "") this.#startStreaming(turn);
     return dispatchedMessageId;
   }
 
@@ -689,7 +699,7 @@ export class Bridge {
    * 「真的有内容要发」为止；见 startTurn 里那段。
    */
   #startStreaming(turn: TurnState): void {
-    if (turn.streaming) return;
+    if (!this.#turnSyncEnabled || turn.streaming) return;
     turn.streaming = true;
     turn.pumping = this.#gateway
       .streamTurn(async (sink) => turn.stream.pump(sink), this.turnSendTarget)
@@ -774,6 +784,10 @@ export class Bridge {
     toolCallId?: string,
     backgroundTarget?: SendTarget,
   ): Promise<{ block: true; reason: string } | undefined> {
+    // 关闭终端回合同步时，无飞书来源的普通回合完全交回 Pi/Harness 原生审批。
+    // 后台任务带显式飞书目标，飞书入站回合也有来源，仍由本扩展保护。
+    if (backgroundTarget === undefined && !this.#turnSyncEnabled) return undefined;
+
     // 判定本身抛错必须按危险处理。这是个 async 函数，未捕获的异常会变成
     // rejected promise 直接跳过 block 契约 —— 结果是危险工具被放行，
     // 在安全闸门上正好是最坏的方向。
@@ -799,7 +813,10 @@ export class Bridge {
     // 审批卡片要弹回**触发这次调用**的那个对话。工具调用绑过消息就按它回查，
     // 否则退回本回合的目标 —— 弹错地方等于让不相干的人看见并批准
     const askTarget = backgroundTarget ?? this.#origins.targetOfToolCall(toolCallId ?? "") ?? this.turnSendTarget;
-    const askers: Asker[] = [this.#gateway.askerFor(askTarget)];
+    const askers: Asker[] = [];
+    if (backgroundTarget !== undefined || this.#turnSyncEnabled) {
+      askers.push(this.#gateway.askerFor(askTarget));
+    }
     if (tuiAsker) askers.push(tuiAsker);
 
     let decision: Decision;

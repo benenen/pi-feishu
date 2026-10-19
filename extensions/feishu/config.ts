@@ -13,6 +13,8 @@ export interface Config {
   appId: string;
   appSecret: string;
   autoStart: boolean;
+  /** 是否把 Pi 终端发起的回合正文、工具进度和审批同步到已绑定飞书会话。 */
+  syncInteractiveTurns: boolean;
   dmMode: DmMode;
   dmAllowlist: string[];
   groupAllowlist: string[];
@@ -162,6 +164,12 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
   if (!appSecret) problems.push("缺少 appSecret（配置文件 appSecret 或环境变量 FEISHU_APP_SECRET）");
 
   const autoStart = readBoolean(merged.autoStart, "autoStart", false, problems);
+  const syncInteractiveTurns = readBoolean(
+    merged.syncInteractiveTurns,
+    "syncInteractiveTurns",
+    true,
+    problems,
+  );
   const requireMention = readBoolean(merged.requireMention, "requireMention", true, problems);
   const multiChat = readBoolean(merged.multiChat, "multiChat", false, problems);
 
@@ -318,6 +326,7 @@ export function loadConfig({ files, env, cwd }: LoadConfigArgs): Config {
     appId: appId as string,
     appSecret: appSecret as string,
     autoStart,
+    syncInteractiveTurns,
     dmMode,
     dmAllowlist,
     groupAllowlist,

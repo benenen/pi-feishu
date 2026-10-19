@@ -665,6 +665,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("input", (event) => {
     const source = event.source === "extension" ? "feishu" : "interactive";
+    if (source === "interactive" && config?.syncInteractiveTurns === false) return;
     bridge?.onUserPrompt(event.text, source);
   });
 

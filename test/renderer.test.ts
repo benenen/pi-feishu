@@ -107,6 +107,7 @@ const CFG: Config = {
   appId: "cli_abc",
   appSecret: "SUPER_SECRET_VALUE",
   autoStart: true,
+  syncInteractiveTurns: true,
   dmMode: "open",
   dmAllowlist: [],
   groupAllowlist: ["oc_g1"],
@@ -267,6 +268,18 @@ test("status：配对码本身不出现在状态文本里", () => {
 
 test("status：显示 direct 传输", () => {
   assert.match(renderStatus({ running: true, config: CFG, boundChatId: "oc_x" }), /direct/);
+});
+
+test("status：显示终端回合同步开关", () => {
+  assert.match(renderStatus({ running: true, config: CFG, boundChatId: "oc_x" }), /终端回合同步：开启/);
+  assert.match(
+    renderStatus({
+      running: true,
+      config: { ...CFG, syncInteractiveTurns: false },
+      boundChatId: "oc_x",
+    }),
+    /终端回合同步：关闭/,
+  );
 });
 
 test("status：bindTarget 为 code 时说的是配对码，不是「直接绑定 code」", () => {

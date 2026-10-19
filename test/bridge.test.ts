@@ -88,6 +88,7 @@ const CONFIG = {
   appId: "a",
   appSecret: "b",
   autoStart: false,
+  syncInteractiveTurns: true,
   dmMode: "allowlist" as const,
   dmAllowlist: ["ou_1"],
   groupAllowlist: [],
@@ -267,6 +268,60 @@ test("gateToolCall：审批通道全挂时 fail-closed", async () => {
   const blocked = await bridge.gateToolCall("bash", { command: "rm -rf /" }, undefined);
   assert.equal(blocked?.block, true);
   assert.ok(blocked?.reason.includes("审批通道不可用"));
+});
+
+test("关闭终端同步后，无飞书来源的工具调用完全跳过扩展审批", async () => {
+  let feishuApprovals = 0;
+  let tuiApprovals = 0;
+  const bridge = new Bridge(
+    { ...CONFIG, syncInteractiveTurns: false },
+    fakeGateway({
+      askerFor: () => async () => {
+        feishuApprovals += 1;
+        return { allow: false, reason: "不该调用" };
+      },
+    }),
+    () => {},
+    () => 0,
+    1000,
+  );
+
+  bridge.startTurn();
+  const result = await bridge.gateToolCall(
+    "bash",
+    { command: "rm -rf /" },
+    async () => {
+      tuiApprovals += 1;
+      return { allow: false, reason: "不该调用" };
+    },
+  );
+
+  assert.equal(result, undefined, "应完全交给 Pi/Harness 原生审批策略");
+  assert.equal(feishuApprovals, 0);
+  assert.equal(tuiApprovals, 0);
+});
+
+test("关闭终端同步不放宽飞书来源回合的扩展审批", async () => {
+  let approvals = 0;
+  const bridge = new Bridge(
+    { ...MULTI, syncInteractiveTurns: false },
+    fakeGateway({
+      askerFor: () => async () => {
+        approvals += 1;
+        return { allow: false, reason: "飞书拒绝" };
+      },
+    }),
+    () => {},
+    () => 0,
+    1000,
+  );
+
+  claimFrom(bridge, "oc_group");
+  bridge.startTurn();
+  const result = await bridge.gateToolCall("bash", { command: "rm -rf /" }, undefined);
+
+  assert.deepEqual(result, { block: true, reason: "飞书拒绝" });
+  assert.equal(approvals, 1);
 });
 
 // ── 本回合全部允许 ──────────────────────────────────────────────────
@@ -604,6 +659,44 @@ test("终端输入清掉来源 —— 不能沿用上一条飞书消息的对话
   await bridge.endTurn();
 
   assert.deepEqual(sink.streams, ["oc_group", undefined]);
+});
+
+test("关闭终端同步后，Pi 终端发起的回合不建飞书卡片", async () => {
+  const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
+  const bridge = new Bridge(
+    { ...CONFIG, syncInteractiveTurns: false },
+    targetTrackingGateway(sink),
+    () => {},
+    () => 0,
+    1000,
+  );
+
+  bridge.startTurn();
+  bridge.onUserPrompt("终端问题", "interactive");
+  bridge.onTextDelta("终端回答");
+  bridge.onToolStart("call_1", "read", { path: "README.md" });
+  bridge.onToolEnd("call_1", false);
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, [], "终端发起回合的正文和工具进度都不该同步飞书");
+});
+
+test("关闭终端同步不影响飞书入站回合", async () => {
+  const sink = { streams: [] as (string | undefined)[], texts: [], asks: [] };
+  const bridge = new Bridge(
+    { ...MULTI, syncInteractiveTurns: false },
+    targetTrackingGateway(sink),
+    () => {},
+    () => 0,
+    1000,
+  );
+
+  claimFrom(bridge, "oc_group");
+  bridge.startTurn();
+  bridge.onTextDelta("飞书回答");
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_group"]);
 });
 
 test("两条来自不同对话的消息，各自的回合回各自的对话", async () => {
@@ -1281,6 +1374,30 @@ test("watcher 推送触发的回合，发回当初派活的那个对话", async 
   await bridge.endTurn();
 
   assert.deepEqual(sink.streams, ["oc_group", "oc_group"], "结果必须回到派活的那个群");
+});
+
+test("关闭终端同步后，带飞书来源的 watcher 推送仍回原对话", async () => {
+  const sink = emptySink();
+  const bridge = new Bridge(
+    { ...MULTI, syncInteractiveTurns: false },
+    targetTrackingGateway(sink),
+    () => {},
+    () => 0,
+    1000,
+  );
+
+  claimFrom(bridge, "oc_group");
+  bridge.startTurn();
+  dispatch(bridge, "pi-ssh");
+  await bridge.endTurn();
+  bridge.settleAgent();
+
+  bridge.startTurn();
+  notice(bridge, "pi-ssh");
+  bridge.onTextDelta("后台结果");
+  await bridge.endTurn();
+
+  assert.deepEqual(sink.streams, ["oc_group", "oc_group"]);
 });
 
 test("推送并入正在跑的回合时，认领到的来源仍然优先", async () => {
